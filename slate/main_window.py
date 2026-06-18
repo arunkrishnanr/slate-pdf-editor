@@ -505,18 +505,32 @@ class MainWindow(QMainWindow):
         m_help.addAction(self.act_about_dev)
 
     def _configure_ocr(self):
-        # Prefer a tesseract bundled under vendor/ (works inside a frozen one-file exe,
-        # where data is unpacked next to this module); otherwise fall back to PATH.
+        """Use the Tesseract bundled inside the app (vendor/tesseract/bin) so OCR is fully
+        self-contained — and never touches the user's system. Falls back to PATH only when
+        running from source in development."""
         import sys
         import shutil
-        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(__file__)))
-        names = ("tesseract.exe", "tesseract") if sys.platform.startswith("win") else ("tesseract",)
-        for name in names:
-            candidate = os.path.join(base, "vendor", name)
-            if os.path.exists(candidate):
-                ocr_mod.configure_tesseract(candidate)
+        bases = []
+        if getattr(sys, "frozen", False):
+            mei = getattr(sys, "_MEIPASS", None)
+            if mei:
+                bases.append(mei)
+            exe_dir = os.path.dirname(sys.executable)
+            bases.append(os.path.join(exe_dir, "..", "Resources"))  # macOS .app layout
+            bases.append(exe_dir)
+        else:
+            bases.append(os.path.dirname(os.path.dirname(__file__)))  # repo root (vendor/ in dev)
+        binname = "tesseract.exe" if sys.platform.startswith("win") else "tesseract"
+        for base in bases:
+            tdir = os.path.join(base, "vendor", "tesseract")
+            tbin = os.path.join(tdir, "bin", binname)
+            if os.path.exists(tbin):
+                ocr_mod.configure_tesseract(tbin)
+                tessdata = os.path.join(tdir, "share", "tessdata")
+                if os.path.isdir(tessdata):
+                    os.environ["TESSDATA_PREFIX"] = tessdata
                 return
-        found = shutil.which("tesseract")
+        found = shutil.which("tesseract")   # dev fallback only
         if found:
             ocr_mod.configure_tesseract(found)
 

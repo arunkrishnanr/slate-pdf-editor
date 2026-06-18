@@ -17,9 +17,14 @@ IS_MAC = sys.platform == "darwin"
 
 datas = [(RES, "slate/resources")]
 
-# Bundle a tesseract binary + tessdata if present in vendor/ (optional, for offline OCR).
+# Bundle the self-contained Tesseract toolchain (vendor/) for offline OCR.
+#   • Windows: let PyInstaller pack it into the one-file exe (extracted at runtime).
+#   • macOS: do NOT add it here — PyInstaller dedups/rewrites same-named dylibs
+#     (libpng/libtiff/… shared with PyMuPDF/OpenCV/Pillow), which silently swaps
+#     Tesseract's libs and breaks it. build_macos.sh copies vendor/tesseract into the
+#     .app verbatim instead, preserving the dylibbundler relocation untouched.
 vendor = os.path.join(ROOT, "vendor")
-if os.path.isdir(vendor):
+if os.path.isdir(vendor) and IS_WIN:
     datas.append((vendor, "vendor"))
 
 icon = os.path.join(RES, "icon.ico" if IS_WIN else "icon.icns")
