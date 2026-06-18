@@ -77,7 +77,9 @@ class PageView(QGraphicsView):
         self._spans: list[TextSpan] = []
         self._blocks: list = []
         self._hover_item: Optional[QGraphicsRectItem] = None
+        self._search_item: Optional[QGraphicsRectItem] = None
         self._mode = Mode.SELECT
+        self._para_detect = True
 
         self._editor: Optional[QLineEdit] = None
         self._editing_span: Optional[TextSpan] = None
@@ -116,11 +118,32 @@ class PageView(QGraphicsView):
         pix = QPixmap.fromImage(img)
         self._scene.clear()
         self._hover_item = None
+        self._search_item = None
         self._pixmap_item = self._scene.addPixmap(pix)
         self._scene.setSceneRect(QRectF(pix.rect()))
 
     def set_zoom(self, zoom: float):
         self._zoom = zoom
+
+    def set_paragraph_detection(self, on: bool):
+        self._para_detect = on
+
+    def show_search_highlight(self, bbox):
+        """Draw a temporary highlight over a search hit (cleared on next page set)."""
+        if self._search_item is not None:
+            try:
+                self._scene.removeItem(self._search_item)
+            except Exception:
+                pass
+            self._search_item = None
+        if bbox is None:
+            return
+        item = QGraphicsRectItem(self._bbox_scene_rect(bbox))
+        item.setPen(QPen(QColor(240, 180, 20), 1.5))
+        item.setBrush(QBrush(QColor(255, 220, 0, 80)))
+        item.setZValue(9)
+        self._scene.addItem(item)
+        self._search_item = item
 
     # -- hit testing -------------------------------------------------------
 
@@ -182,7 +205,8 @@ class PageView(QGraphicsView):
             block = self._block_at(scene_pt)
             # Populate the properties panel for whatever was clicked.
             self.selected.emit(span, block)
-            if block is not None and getattr(block, "line_count", 1) >= 2 and span is not None:
+            if self._para_detect and block is not None and getattr(block, "line_count", 1) >= 2 \
+                    and span is not None:
                 # Multi-line block -> edit the whole paragraph and reflow.
                 self._begin_block_edit(block)
             elif span is not None:

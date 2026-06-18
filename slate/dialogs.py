@@ -7,7 +7,7 @@ import platform
 import subprocess
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QDialogButtonBox, QSpinBox, QComboBox, QPlainTextEdit, QFormLayout,
@@ -325,6 +325,52 @@ landscape. Choose <b>scale-to-fit</b> or <b>keep-canvas</b> — both keep text e
 <li>Zoom with the toolbar or <b>Ctrl/⌘ + mouse wheel</b>. Navigate pages with ◀ ▶.</li>
 </ul>
 """
+
+
+class FindReplaceDialog(QDialog):
+    """Non-modal find & replace. Emits signals the main window acts on."""
+    findNext = Signal(str, bool)            # query, match_case
+    replaceAll = Signal(str, str, bool)     # query, replacement, match_case
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Find & Replace")
+        self.setMinimumWidth(380)
+        form = QFormLayout(self)
+
+        self.find_edit = QLineEdit()
+        self.find_edit.setPlaceholderText("Find…")
+        form.addRow("Find", self.find_edit)
+
+        self.replace_edit = QLineEdit()
+        self.replace_edit.setPlaceholderText("Replace with…")
+        form.addRow("Replace", self.replace_edit)
+
+        self.match_case = QCheckBox("Match case")
+        form.addRow("", self.match_case)
+
+        self.count_label = QLabel("")
+        self.count_label.setStyleSheet("color: #9aa0a8; font-size: 11px;")
+        form.addRow("", self.count_label)
+
+        row = QHBoxLayout()
+        btn_find = QPushButton("Find Next")
+        btn_replace = QPushButton("Replace All")
+        btn_close = QPushButton("Close")
+        row.addWidget(btn_find)
+        row.addWidget(btn_replace)
+        row.addStretch(1)
+        row.addWidget(btn_close)
+        form.addRow(row)
+
+        btn_find.clicked.connect(lambda: self.findNext.emit(self.find_edit.text(), self.match_case.isChecked()))
+        self.find_edit.returnPressed.connect(btn_find.click)
+        btn_replace.clicked.connect(lambda: self.replaceAll.emit(
+            self.find_edit.text(), self.replace_edit.text(), self.match_case.isChecked()))
+        btn_close.clicked.connect(self.close)
+
+    def set_status(self, text: str):
+        self.count_label.setText(text)
 
 
 class HelpDialog(QDialog):

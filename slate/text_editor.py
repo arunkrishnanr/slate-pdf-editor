@@ -51,6 +51,25 @@ class EditResult:
     substituted: bool = False
 
 
+def _ci_replace(text: str, query: str, replacement: str, match_case: bool) -> str:
+    """Replace occurrences of query in text, optionally case-insensitively."""
+    if match_case:
+        return text.replace(query, replacement)
+    out = []
+    low = text.lower()
+    qlow = query.lower()
+    i = 0
+    while True:
+        j = low.find(qlow, i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:j])
+        out.append(replacement)
+        i = j + len(query)
+    return "".join(out)
+
+
 def _fontname_for_file(path: str) -> str:
     """A stable, unique PyMuPDF font alias derived from a font file path.
 
@@ -254,6 +273,29 @@ class TextEditor:
         note = "" if abs(cur - size) < 0.1 else f" (font scaled to {cur:.1f}pt to fit)"
         return EditResult(ok=True, message=resolution.status_text + note, resolution=resolution,
                           substituted=not resolution.is_exact)
+
+    def replace_all(self, query: str, replacement: str, match_case: bool = False) -> int:
+        """Replace every occurrence of `query` with `replacement` across the document.
+
+        Works span-by-span on real text (so it's a true in-place edit). Returns the
+        number of occurrences replaced.
+        """
+        if not query:
+            return 0
+        total = 0
+        for i in range(self.doc.page_count):
+            for span in self.doc.spans_on_page(i):
+                text = span.text
+                hay = text if match_case else text.lower()
+                ndl = query if match_case else query.lower()
+                n = hay.count(ndl)
+                if n == 0:
+                    continue
+                new_text = _ci_replace(text, query, replacement, match_case)
+                res = self.replace_span_text(span, new_text)
+                if res.ok:
+                    total += n
+        return total
 
     def add_text_box(
         self,

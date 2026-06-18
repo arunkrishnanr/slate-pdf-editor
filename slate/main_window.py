@@ -25,6 +25,7 @@ from .pages_panel import PagesPanel
 from .properties_panel import PropertiesPanel, Selection
 from .dialogs import (
     FontPromptDialog, AddTextDialog, OcrReviewDialog, PageSizeDialog, HelpDialog,
+    FindReplaceDialog,
 )
 
 DEVELOPER = "Aaron Krrish"
@@ -45,6 +46,14 @@ class MainWindow(QMainWindow):
         self._blocks: list = []
         self._sel_span: TextSpan | None = None
         self._sel_block = None
+        self._para_detect = True
+        self._undo_stack: list[bytes] = []
+        self._redo_stack: list[bytes] = []
+        self._UNDO_CAP = 25
+        self._find_dialog: FindReplaceDialog | None = None
+        self._find_hits: list = []
+        self._find_idx = -1
+        self._find_query = ""
 
         # Central page view
         self.view = PageView()
@@ -103,6 +112,16 @@ class MainWindow(QMainWindow):
         self.act_print_preview = QAction("Print Preview…", self, triggered=self.print_preview)
         self.act_quit = QAction("Quit", self, shortcut=QKeySequence.Quit, triggered=self.close)
 
+        self.act_undo = QAction("Undo", self, shortcut=QKeySequence.Undo, triggered=self.undo)
+        self.act_redo = QAction("Redo", self, shortcut=QKeySequence.Redo, triggered=self.redo)
+        self.act_undo.setEnabled(False)
+        self.act_redo.setEnabled(False)
+        self.act_find = QAction("Find & Replace…", self, shortcut=QKeySequence.Find, triggered=self.show_find)
+
+        self.act_para_detect = QAction("Paragraph Detection", self, checkable=True)
+        self.act_para_detect.setChecked(True)
+        self.act_para_detect.toggled.connect(self._toggle_paragraph_detection)
+
         self.act_mode_select = QAction("Edit Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
         self.act_mode_add = QAction("Add Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.ADD_TEXT))
         self.act_mode_box = QAction("Text Box", self, checkable=True, triggered=lambda: self.set_mode(Mode.TEXT_BOX))
@@ -132,6 +151,10 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
         tb.addAction(self.act_open)
         tb.addAction(self.act_save)
+        tb.addSeparator()
+        tb.addAction(self.act_undo)
+        tb.addAction(self.act_redo)
+        tb.addAction(self.act_find)
         tb.addSeparator()
         tb.addAction(self.act_mode_select)
         tb.addAction(self.act_mode_add)
@@ -166,6 +189,12 @@ class MainWindow(QMainWindow):
         m_file.addSeparator()
         m_file.addAction(self.act_quit)
 
+        m_edit = bar.addMenu("Edit")
+        m_edit.addAction(self.act_undo)
+        m_edit.addAction(self.act_redo)
+        m_edit.addSeparator()
+        m_edit.addAction(self.act_find)
+
         m_tools = bar.addMenu("Tools")
         for a in (self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr):
             m_tools.addAction(a)
@@ -176,6 +205,9 @@ class MainWindow(QMainWindow):
         m_view = bar.addMenu("View")
         for a in (self.act_zoom_in, self.act_zoom_out, self.act_prev, self.act_next):
             m_view.addAction(a)
+        m_view.addSeparator()
+        m_view.addAction(self.act_para_detect)
+        m_view.addSeparator()
         m_view.addAction(self.pages_dock.toggleViewAction())
         m_view.addAction(self.props_dock.toggleViewAction())
 
@@ -205,7 +237,7 @@ class MainWindow(QMainWindow):
 
     def _set_open_state(self, is_open: bool):
         for a in (self.act_save, self.act_save_as, self.act_export,
-                  self.act_print, self.act_print_preview,
+                  self.act_print, self.act_print_preview, self.act_find,
                   self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr,
                   self.act_page_size,
                   self.act_prev, self.act_next, self.act_zoom_in, self.act_zoom_out):
@@ -233,6 +265,7 @@ class MainWindow(QMainWindow):
             return
         self.document.new_blank()
         self.current_page = 0
+        self._reset_history()
         self._after_document_changed()
         self.status("New blank document.")
 
@@ -248,6 +281,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not open", str(e))
             return
         self.current_page = 0
+        self._reset_history()
         self._after_document_changed()
         self.status(f"Opened {os.path.basename(path)} — {self.document.page_count} pages")
 
@@ -291,6 +325,14 @@ class MainWindow(QMainWindow):
 
     # -- rendering ---------------------------------------------------------
 
+    def _reset_history(self):
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._find_query = ""
+        self._find_hits = []
+        self._find_idx = -1
+        self._update_undo_actions()
+
     def _after_document_changed(self):
         self._set_open_state(self.document.is_open)
         self.pages.refresh(self.document, self.current_page)
@@ -303,7 +345,7 @@ class MainWindow(QMainWindow):
         self.current_page = max(0, min(self.current_page, self.document.page_count - 1))
         png = self.document.render_page_png(self.current_page, self.zoom)
         spans = self.document.spans_on_page(self.current_page)
-        self._blocks = struct.analyze_page(self.document, self.current_page)
+        self._blocks = struct.analyze_page(self.document, self.current_page) if self._para_detect else []
         self.view.set_page(png, self.zoom, self.current_page, spans, self._blocks)
         self.props.show_selection(None)
         self._sel_span = self._sel_block = None
@@ -379,6 +421,7 @@ class MainWindow(QMainWindow):
                 return
             force_substitute = True  # user chose to proceed with substitute
 
+        self._snapshot()
         result = self.editor.replace_span_text(span, new_text, res, force_substitute=force_substitute)
         self.status(result.message)
         self.render_current_page()
@@ -394,6 +437,7 @@ class MainWindow(QMainWindow):
             return
         req = fm.parse_pdf_fontname(family)
         # y is the click point; nudge the baseline down by the font size.
+        self._snapshot()
         result = self.editor.add_text(self.current_page, (x, y + size), text, req, size=size)
         self.status(result.message)
         self.render_current_page()
@@ -418,6 +462,7 @@ class MainWindow(QMainWindow):
             force_substitute = True
         if force_substitute and res.substitute:
             res = fm.FontResolution(res.request, None, res.substitute, None)
+        self._snapshot()
         result = self.editor.replace_block_text(
             block, new_text, res, size=block.size, color=_int_to_rgb(block.color), align=block.align)
         self.status(result.message)
@@ -434,6 +479,7 @@ class MainWindow(QMainWindow):
         if not text.strip():
             return
         req = fm.parse_pdf_fontname(family)
+        self._snapshot()
         result = self.editor.add_text_box(self.current_page, rect_pts, text, req, size=size)
         self.status(result.message)
         self.render_current_page()
@@ -445,9 +491,11 @@ class MainWindow(QMainWindow):
         req = fm.FontRequest(family, family, bold, italic)
         res = fm.resolve(req)
         if whole_paragraph and self._sel_block is not None:
+            self._snapshot()
             result = self.editor.replace_block_text(
                 self._sel_block, self._sel_block.text, res, size=size, color=color, align=align)
         elif self._sel_span is not None:
+            self._snapshot()
             span = self._sel_span
             result = self.editor.replace_span_text(
                 span, span.text, res, size_override=size, color_override=color)
@@ -469,6 +517,7 @@ class MainWindow(QMainWindow):
             return
         width, height, apply_all, scale = dlg.result_values()
         indices = list(range(self.document.page_count)) if apply_all else [self.current_page]
+        self._snapshot()
         self.document.set_page_size(indices, width, height, scale)
         self._after_document_changed()
         scope = f"all {len(indices)} pages" if apply_all else f"page {self.current_page + 1}"
@@ -508,6 +557,7 @@ class MainWindow(QMainWindow):
             font_name="Helvetica", size=median_size, color=0, flags=0, font_xref=0,
         )
         res = self.editor.resolve_font(region_span)
+        self._snapshot()
         result = self.editor.replace_span_text(region_span, corrected, res)
         self.status("Replaced OCR'd text in place. " + result.message)
         self.render_current_page()
@@ -525,6 +575,7 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Delete pages",
                                 f"Delete {len(rows)} page(s)?") != QMessageBox.Yes:
             return
+        self._snapshot()
         for i in sorted(rows, reverse=True):
             self.document.delete_page(i)
         self.current_page = min(self.current_page, self.document.page_count - 1)
@@ -551,12 +602,14 @@ class MainWindow(QMainWindow):
         self.status(f"Split after page {after_index + 1} → part1.pdf, part2.pdf")
 
     def _on_rotate(self, rows: list[int], degrees: int):
+        self._snapshot()
         for i in rows:
             self.document.rotate_page(i, degrees)
         self._after_document_changed()
         self.status(f"Rotated {len(rows)} page(s) by {degrees}°.")
 
     def _on_reordered(self, src: int, dst: int):
+        self._snapshot()
         self.document.move_page(src, dst)
         self.current_page = dst
         self.pages.refresh(self.document, self.current_page)
@@ -638,6 +691,106 @@ class MainWindow(QMainWindow):
                 painter.drawImage(0, 0, img)
         finally:
             painter.end()
+
+    # -- undo / redo -------------------------------------------------------
+
+    def _snapshot(self):
+        """Record the document state before a mutation, for undo."""
+        try:
+            self._undo_stack.append(self.document.snapshot())
+            if len(self._undo_stack) > self._UNDO_CAP:
+                self._undo_stack.pop(0)
+            self._redo_stack.clear()
+        except Exception:
+            pass
+        self._update_undo_actions()
+
+    def _update_undo_actions(self):
+        self.act_undo.setEnabled(bool(self._undo_stack))
+        self.act_redo.setEnabled(bool(self._redo_stack))
+
+    def undo(self):
+        if not self._undo_stack:
+            return
+        try:
+            self._redo_stack.append(self.document.snapshot())
+            self.document.restore(self._undo_stack.pop())
+        except Exception as e:
+            self.status(f"Undo failed: {e}")
+            return
+        self._after_document_changed()
+        self._update_undo_actions()
+        self.status("Undid last change.")
+
+    def redo(self):
+        if not self._redo_stack:
+            return
+        try:
+            self._undo_stack.append(self.document.snapshot())
+            self.document.restore(self._redo_stack.pop())
+        except Exception as e:
+            self.status(f"Redo failed: {e}")
+            return
+        self._after_document_changed()
+        self._update_undo_actions()
+        self.status("Redid change.")
+
+    # -- find & replace ----------------------------------------------------
+
+    def show_find(self):
+        if not self.document.is_open:
+            return
+        if self._find_dialog is None:
+            self._find_dialog = FindReplaceDialog(self)
+            self._find_dialog.findNext.connect(self._on_find_next)
+            self._find_dialog.replaceAll.connect(self._on_replace_all)
+        self._find_dialog.show()
+        self._find_dialog.raise_()
+        self._find_dialog.activateWindow()
+
+    def _on_find_next(self, query: str, match_case: bool):
+        if not query:
+            return
+        # Recompute hits if the query changed.
+        if query != self._find_query:
+            self._find_query = query
+            self._find_hits = self.document.search(query)
+            self._find_idx = -1
+        if not self._find_hits:
+            if self._find_dialog:
+                self._find_dialog.set_status("No matches.")
+            return
+        self._find_idx = (self._find_idx + 1) % len(self._find_hits)
+        page_index, rect = self._find_hits[self._find_idx]
+        if page_index != self.current_page:
+            self.current_page = page_index
+            self.render_current_page()
+        self.view.show_search_highlight((rect.x0, rect.y0, rect.x1, rect.y1))
+        self.view.centerOn(rect.x0 * self.zoom, rect.y0 * self.zoom)
+        if self._find_dialog:
+            self._find_dialog.set_status(f"Match {self._find_idx + 1} of {len(self._find_hits)} "
+                                         f"(page {page_index + 1})")
+
+    def _on_replace_all(self, query: str, replacement: str, match_case: bool):
+        if not query:
+            return
+        self._snapshot()
+        count = self.editor.replace_all(query, replacement, match_case)
+        self._find_query = ""  # force re-search next Find
+        self.render_current_page()
+        self.pages.refresh(self.document, self.current_page)
+        self._update_title()
+        msg = f"Replaced {count} occurrence(s)."
+        self.status(msg)
+        if self._find_dialog:
+            self._find_dialog.set_status(msg)
+
+    def _toggle_paragraph_detection(self, on: bool):
+        self._para_detect = on
+        self.view.set_paragraph_detection(on)
+        self.render_current_page()
+        self.status(f"Paragraph detection {'on' if on else 'off'} — "
+                    f"{'paragraphs edit as a block' if on else 'every click edits a single line'}.")
 
     # -- help / about ------------------------------------------------------
 

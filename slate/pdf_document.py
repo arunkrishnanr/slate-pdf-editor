@@ -265,3 +265,28 @@ class PdfDocument:
     def _reopen(self, path: str):
         self.doc.close()
         self.doc = fitz.open(path)
+
+    # -- undo/redo snapshots ----------------------------------------------
+
+    def snapshot(self) -> bytes:
+        """Serialize the current document to bytes (for the undo stack)."""
+        return self.doc.tobytes(deflate=True, garbage=0)
+
+    def restore(self, data: bytes):
+        """Replace the in-memory document with a previously taken snapshot."""
+        self.doc.close()
+        self.doc = fitz.open(stream=data, filetype="pdf")
+        self._embedded_font_cache.clear()
+        self.dirty = True
+
+    # -- text search -------------------------------------------------------
+
+    def search(self, query: str) -> list[tuple[int, fitz.Rect]]:
+        """Find a string across all pages -> list of (page_index, rect)."""
+        hits: list[tuple[int, fitz.Rect]] = []
+        if not query:
+            return hits
+        for i in range(self.page_count):
+            for r in self.doc[i].search_for(query):
+                hits.append((i, r))
+        return hits
