@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QDialogButtonBox, QSpinBox, QComboBox, QPlainTextEdit, QFormLayout,
-    QRadioButton, QButtonGroup, QCheckBox, QTextBrowser,
+    QRadioButton, QButtonGroup, QCheckBox, QTextBrowser, QGroupBox,
 )
 
 from . import font_manager as fm
@@ -376,6 +376,124 @@ landscape. Choose <b>scale-to-fit</b> or <b>keep-canvas</b> — both keep text e
 <li>Zoom with the toolbar or <b>Ctrl/⌘ + mouse wheel</b>. Navigate pages with ◀ ▶.</li>
 </ul>
 """
+
+
+class DocumentSetupDialog(QDialog):
+    """File ▸ Document Setup — document properties (metadata) plus optional page setup."""
+
+    def __init__(self, metadata: dict, current_label: str | None, page_count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Document Setup")
+        self.setMinimumWidth(480)
+        root = QVBoxLayout(self)
+
+        # --- Document properties (metadata) ---
+        props = QGroupBox("Document Properties")
+        pf = QFormLayout(props)
+        self.title_edit = QLineEdit(metadata.get("title", ""))
+        self.author_edit = QLineEdit(metadata.get("author", ""))
+        self.subject_edit = QLineEdit(metadata.get("subject", ""))
+        self.keywords_edit = QLineEdit(metadata.get("keywords", ""))
+        pf.addRow("Title", self.title_edit)
+        pf.addRow("Author", self.author_edit)
+        pf.addRow("Subject", self.subject_edit)
+        pf.addRow("Keywords", self.keywords_edit)
+        root.addWidget(props)
+
+        # --- Page setup (only applied if the group is checked) ---
+        self.page_group = QGroupBox("Resize pages")
+        self.page_group.setCheckable(True)
+        self.page_group.setChecked(False)
+        gf = QFormLayout(self.page_group)
+
+        self.cat_combo = QComboBox()
+        for gname, _names in ps.PAGE_SIZE_GROUPS:
+            self.cat_combo.addItem(gname)
+        self.cat_combo.addItem("Custom")
+        gf.addRow("Category", self.cat_combo)
+
+        self.size_combo = QComboBox()
+        gf.addRow("Size", self.size_combo)
+
+        crow = QHBoxLayout()
+        self.cw = QSpinBox(); self.cw.setRange(10, 5000); self.cw.setValue(210); self.cw.setSuffix(" mm")
+        self.ch = QSpinBox(); self.ch.setRange(10, 5000); self.ch.setValue(297); self.ch.setSuffix(" mm")
+        crow.addWidget(QLabel("W")); crow.addWidget(self.cw)
+        crow.addWidget(QLabel("H")); crow.addWidget(self.ch)
+        gf.addRow("Custom size", crow)
+
+        orow = QHBoxLayout()
+        self.portrait = QRadioButton("Portrait"); self.landscape = QRadioButton("Landscape")
+        self.portrait.setChecked(True)
+        og = QButtonGroup(self); og.addButton(self.portrait); og.addButton(self.landscape)
+        orow.addWidget(self.portrait); orow.addWidget(self.landscape); orow.addStretch(1)
+        gf.addRow("Orientation", orow)
+
+        srow = QHBoxLayout()
+        self.scope_current = QRadioButton("This page"); self.scope_all = QRadioButton(f"All {page_count} pages")
+        self.scope_current.setChecked(True)
+        sg = QButtonGroup(self); sg.addButton(self.scope_current); sg.addButton(self.scope_all)
+        srow.addWidget(self.scope_current); srow.addWidget(self.scope_all); srow.addStretch(1)
+        gf.addRow("Apply to", srow)
+
+        cvrow = QVBoxLayout()
+        self.scale_content = QRadioButton("Scale content to fit the new size")
+        self.keep_content = QRadioButton("Keep content as-is (change dimensions only)")
+        self.scale_content.setChecked(True)
+        bg = QButtonGroup(self); bg.addButton(self.scale_content); bg.addButton(self.keep_content)
+        cvrow.addWidget(self.scale_content); cvrow.addWidget(self.keep_content)
+        gf.addRow("Content", cvrow)
+        root.addWidget(self.page_group)
+
+        self.cat_combo.currentIndexChanged.connect(self._on_cat)
+        start = 0
+        if current_label:
+            for gi, (_g, names) in enumerate(ps.PAGE_SIZE_GROUPS):
+                if current_label in names:
+                    start = gi
+                    break
+        self.cat_combo.setCurrentIndex(start)
+        self._on_cat(start)
+        if current_label:
+            j = self.size_combo.findData(current_label)
+            if j >= 0:
+                self.size_combo.setCurrentIndex(j)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _on_cat(self, idx: int):
+        is_custom = self.cat_combo.currentText() == "Custom"
+        self.size_combo.blockSignals(True)
+        self.size_combo.clear()
+        if not is_custom and 0 <= idx < len(ps.PAGE_SIZE_GROUPS):
+            for n in ps.PAGE_SIZE_GROUPS[idx][1]:
+                self.size_combo.addItem(ps.size_label(n), n)
+        self.size_combo.blockSignals(False)
+        self.size_combo.setEnabled(not is_custom)
+        if hasattr(self, "cw"):
+            self.cw.setEnabled(is_custom)
+            self.ch.setEnabled(is_custom)
+
+    def metadata(self) -> dict:
+        return {"title": self.title_edit.text(), "author": self.author_edit.text(),
+                "subject": self.subject_edit.text(), "keywords": self.keywords_edit.text()}
+
+    def page_resize(self):
+        """Return (w, h, apply_all, scale) if pages should be resized, else None."""
+        if not self.page_group.isChecked():
+            return None
+        if self.cat_combo.currentText() == "Custom":
+            w, h = self.cw.value() * ps.MM, self.ch.value() * ps.MM
+        else:
+            w, h = ps.PAGE_SIZES[self.size_combo.currentData()]
+        if self.landscape.isChecked():
+            w, h = max(w, h), min(w, h)
+        else:
+            w, h = min(w, h), max(w, h)
+        return w, h, self.scope_all.isChecked(), self.scale_content.isChecked()
 
 
 class FindReplaceDialog(QDialog):

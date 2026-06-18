@@ -195,6 +195,16 @@ class PdfDocument:
         page.set_rotation((page.rotation + degrees) % 360)
         self.dirty = True
 
+    def get_metadata(self) -> dict:
+        return dict(self.doc.metadata) if self.doc else {}
+
+    def set_metadata(self, meta: dict):
+        """Merge the given fields into the document metadata."""
+        current = dict(self.doc.metadata or {})
+        current.update({k: v for k, v in meta.items() if v is not None})
+        self.doc.set_metadata(current)
+        self.dirty = True
+
     def set_page_size(self, indices: list[int], width: float, height: float,
                       scale_content: bool):
         """Resize pages to width×height points, keeping text live & editable.
@@ -377,8 +387,15 @@ class PdfDocument:
     def detect_table_grids(self, page_index: int) -> list[dict]:
         """Return editable grid structures for tables: {bbox, cols:[x...], rows:[y...]}."""
         out = []
+        page = self.doc[page_index]
+        finder = None
         try:
-            finder = self.doc[page_index].find_tables()
+            finder = page.find_tables()
+            if not finder.tables:               # lines-only tables (forms) need the lines strategy
+                finder = page.find_tables(strategy="lines")
+        except Exception:
+            finder = None
+        if finder is not None:
             for t in finder.tables:
                 xs, ys = set(), set()
                 for c in t.cells:
@@ -393,8 +410,6 @@ class PdfDocument:
                 else:
                     bx = tuple(t.bbox)
                     out.append({"bbox": bx, "cols": [bx[0], bx[2]], "rows": [bx[1], bx[3]]})
-        except Exception:
-            pass
         return out
 
     def draw_table_grids(self, page_index: int, grids: list, color=(0, 0, 0), width: float = 0.8):

@@ -27,7 +27,7 @@ from .properties_panel import PropertiesPanel, Selection
 from .widgets import SwitchButton
 from .dialogs import (
     FontPromptDialog, AddTextDialog, OcrReviewDialog, PageSizeDialog, HelpDialog,
-    FindReplaceDialog,
+    FindReplaceDialog, DocumentSetupDialog,
 )
 
 DEVELOPER = "Aaron Krrish"
@@ -254,6 +254,7 @@ class MainWindow(QMainWindow):
         self.act_save = QAction("Save", self, shortcut=QKeySequence.Save, triggered=self.save_file)
         self.act_save_as = QAction("Save As…", self, shortcut=QKeySequence.SaveAs, triggered=self.save_file_as)
         self.act_export = QAction("Export Copy…", self, triggered=self.export_copy)
+        self.act_doc_setup = QAction("Document Setup…", self, triggered=self.document_setup)
         self.act_print = QAction("Print…", self, shortcut=QKeySequence.Print, triggered=self.print_document)
         self.act_print_preview = QAction("Print Preview…", self, triggered=self.print_preview)
         self.act_quit = QAction("Quit", self, shortcut=QKeySequence.Quit, triggered=self.close)
@@ -433,6 +434,8 @@ class MainWindow(QMainWindow):
         for a in (self.act_new, self.act_open, self.act_save, self.act_save_as, self.act_export):
             m_file.addAction(a)
         m_file.addSeparator()
+        m_file.addAction(self.act_doc_setup)
+        m_file.addSeparator()
         m_export = m_file.addMenu("Export")
         m_export.addAction(self.act_export_images)
         m_export.addAction(self.act_export_text)
@@ -475,9 +478,6 @@ class MainWindow(QMainWindow):
         m_markup.addSeparator()
         m_markup.addAction(self.act_redact)
 
-        m_page = bar.addMenu("Page")
-        m_page.addAction(self.act_page_size)
-
         m_view = bar.addMenu("View")
         m_view.addAction(self.act_edit_mode)
         m_view.addSeparator()
@@ -515,7 +515,7 @@ class MainWindow(QMainWindow):
     # -- state -------------------------------------------------------------
 
     def _set_open_state(self, is_open: bool):
-        for a in (self.act_save, self.act_save_as, self.act_export,
+        for a in (self.act_save, self.act_save_as, self.act_export, self.act_doc_setup,
                   self.act_print, self.act_print_preview, self.act_find,
                   self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr,
                   self.act_page_size, self.act_crop, self.act_edit_mode,
@@ -871,6 +871,25 @@ class MainWindow(QMainWindow):
         self.render_current_page()
         self._refresh_thumbnail(self.current_page)
         self._update_title()
+
+    def document_setup(self):
+        if not self.document.is_open:
+            return
+        meta = self.document.get_metadata()
+        w, h = self.document.page_size(self.current_page)
+        current = ps.nearest_standard(w, h)
+        dlg = DocumentSetupDialog(meta, current, self.document.page_count, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._snapshot()
+        self.document.set_metadata(dlg.metadata())
+        pr = dlg.page_resize()
+        if pr:
+            width, height, apply_all, scale = pr
+            indices = list(range(self.document.page_count)) if apply_all else [self.current_page]
+            self.document.set_page_size(indices, width, height, scale)
+        self._after_document_changed()
+        self.status("Document setup applied." + (" Pages resized." if pr else ""))
 
     def change_page_size(self):
         if not self.document.is_open:
