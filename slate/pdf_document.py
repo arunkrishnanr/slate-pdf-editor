@@ -91,6 +91,13 @@ class PdfDocument:
         self.path = None
         self.dirty = False
         self._embedded_font_cache.clear()
+        # Remove the per-document temp font dir so it doesn't leak for the process life.
+        try:
+            import shutil
+            shutil.rmtree(self._tempdir, ignore_errors=True)
+        except Exception:
+            pass
+        self._tempdir = tempfile.mkdtemp(prefix="slate_fonts_")
 
     @property
     def is_open(self) -> bool:
@@ -497,7 +504,8 @@ class PdfDocument:
             # Incremental save in place when possible; fall back to full rewrite.
             try:
                 self.doc.save(target, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-            except (ValueError, RuntimeError):
+            except Exception:
+                # Incremental can fail (cleaned/encrypted/grown docs) — full rewrite.
                 self.doc.save(target, garbage=4, deflate=True, clean=True)
                 self._reopen(target)
         else:
@@ -508,6 +516,7 @@ class PdfDocument:
     def _reopen(self, path: str):
         self.doc.close()
         self.doc = fitz.open(path)
+        self._embedded_font_cache.clear()  # xref-keyed cache is invalid after a reopen
 
     # -- undo/redo snapshots ----------------------------------------------
 

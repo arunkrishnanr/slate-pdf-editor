@@ -226,8 +226,8 @@ class MainWindow(QMainWindow):
         self._update_undo_actions()
         self._update_title()
         self._sync_zoom_ui()
-        if self._view_only:
-            self.view.set_mode(Mode.VIEW)
+        # Keep the canvas mode and toolbar tool-checkmarks consistent on the new tab.
+        self.set_mode(Mode.VIEW if self._view_only else Mode.SELECT)
 
     def _on_tab_close(self, index: int):
         t = self.tabs.widget(index)
@@ -239,8 +239,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
             if r == QMessageBox.Cancel:
                 return
-            if r == QMessageBox.Save:
-                self.save_file()
+            if r == QMessageBox.Save and not self.save_file():
+                return  # save failed — keep the tab open so work isn't lost
         if isinstance(t, DocumentTab):
             t.document.close()
         self.tabs.removeTab(index)
@@ -616,31 +616,36 @@ class MainWindow(QMainWindow):
         t.document.close()
         t.deleteLater()
 
-    def save_file(self):
+    def save_file(self) -> bool:
+        """Returns True on success, False on failure/cancel (so callers can abort)."""
         if not self.document.is_open:
-            return
+            return False
         if not self.document.path:
             return self.save_file_as()
         try:
             self.document.save()
             self.status(f"Saved {os.path.basename(self.document.path)}")
             self._update_title()
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
+            return False
 
-    def save_file_as(self):
+    def save_file_as(self) -> bool:
         if not self.document.is_open:
-            return
+            return False
         path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", self.document.path or "untitled.pdf",
                                               "PDF files (*.pdf)")
         if not path:
-            return
+            return False
         try:
             self.document.save(path)
             self.status(f"Saved {os.path.basename(path)}")
             self._update_title()
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
+            return False
 
     def export_copy(self):
         if not self.document.is_open:
@@ -657,6 +662,11 @@ class MainWindow(QMainWindow):
     # -- rendering ---------------------------------------------------------
 
     def _after_document_changed(self):
+        # Cached find hits reference pre-edit page rects/indices; drop them so a later
+        # Find Next never points at stale coordinates or a deleted page.
+        self._find_query = ""
+        self._find_hits = []
+        self._find_idx = -1
         self._set_open_state(self.document.is_open)
         self.pages.refresh(self.document, self.current_page)
         self.render_current_page()
@@ -803,7 +813,15 @@ class MainWindow(QMainWindow):
             force_substitute = True  # user chose to proceed with substitute
 
         self._snapshot()
-        result = self.editor.replace_span_text(span, new_text, res, force_substitute=force_substitute)
+        try:
+            result = self.editor.replace_span_text(span, new_text, res, force_substitute=force_substitute)
+        except Exception as e:
+            if self._undo_stack:
+                self._undo_stack.pop()
+            self._update_undo_actions()
+            QMessageBox.warning(self, "Edit failed", str(e))
+            self.render_current_page()
+            return
         self.status(result.message)
         self.render_current_page()
         self._refresh_thumbnail(span.page_index)
@@ -1032,8 +1050,9 @@ class MainWindow(QMainWindow):
                 if r == QMessageBox.Cancel:
                     event.ignore()
                     return
-                if r == QMessageBox.Save:
-                    self.save_file()
+                if r == QMessageBox.Save and not self.save_file():
+                    event.ignore()   # save failed — don't lose the work by quitting
+                    return
         event.accept()
 
     # -- printing ----------------------------------------------------------
@@ -1091,11 +1110,11 @@ class MainWindow(QMainWindow):
 
     def _on_rect_tool(self, mode, rect):
         from .canvas import Mode as M
+        if mode == M.IMAGE and not self._pending_image:
+            return  # nothing to place; don't leave a junk undo snapshot
         self._snapshot()
         try:
             if mode == M.IMAGE:
-                if not self._pending_image:
-                    return
                 self.document.insert_image(self.current_page, rect, self._pending_image)
                 self._pending_image = None
                 self.set_mode(M.SELECT)
@@ -1316,7 +1335,7 @@ class MainWindow(QMainWindow):
         self._find_dialog.activateWindow()
 
     def _on_find_next(self, query: str, match_case: bool):
-        if not query:
+        if not query or self.tab() is None:
             return
         # Recompute hits if the query changed.
         if query != self._find_query:
