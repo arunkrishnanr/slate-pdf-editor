@@ -41,10 +41,25 @@ class PagesPanel(QWidget):
 
         self.list = QListWidget()
         self.list.setViewMode(QListView.IconMode)
-        self.list.setIconSize(QSize(140, 180))
+        self.list.setIconSize(QSize(132, 172))
         self.list.setResizeMode(QListView.Adjust)
         self.list.setMovement(QListView.Snap)
-        self.list.setSpacing(8)
+        self.list.setSpacing(10)
+        self.list.setUniformItemSizes(True)
+        # Selected page = thin orange outline around the thumbnail (no filled box, so the
+        # "Page N" label below stays readable). A transparent same-width border on every
+        # item keeps the layout from shifting when selection changes.
+        self.list.setStyleSheet(
+            "QListWidget { background: #222222; border: none; }"
+            "QListWidget::item {"
+            "  color: #c8c8c8; padding: 6px 6px 4px 6px; margin: 4px;"
+            "  border: 2px solid transparent; border-radius: 8px;"
+            "}"
+            "QListWidget::item:hover { border-color: #3f3f3f; }"
+            "QListWidget::item:selected {"
+            "  background: transparent; color: #ff8431; border: 2px solid #ff8431;"
+            "}"
+        )
         self.list.setDragDropMode(QAbstractItemView.InternalMove)
         self.list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list.setContextMenuPolicy(Qt.CustomContextMenu)
