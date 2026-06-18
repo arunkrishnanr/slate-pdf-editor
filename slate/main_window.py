@@ -215,9 +215,13 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index: int):
         if self.tab() is None:
+            # No documents left — clear every view so nothing stale lingers.
             self._set_open_state(False)
+            self.pages.refresh(self._null_doc, 0)   # clear the thumbnails
             self.props.show_selection(None)
+            self.font_status.setText("")
             self.page_label.setText("  —  ")
+            self.status("No document open — File ▸ Open  (⌘O)")
             self.setWindowTitle(__app_name__)
             return
         self._set_open_state(True)
@@ -251,6 +255,8 @@ class MainWindow(QMainWindow):
     def _build_actions(self):
         self.act_open = QAction("Open…", self, shortcut=QKeySequence.Open, triggered=self.open_file)
         self.act_new = QAction("New", self, shortcut=QKeySequence.New, triggered=self.new_file)
+        self.act_close = QAction("Close Document", self, shortcut=QKeySequence.Close,
+                                 triggered=self.close_current_document)
         self.act_save = QAction("Save", self, shortcut=QKeySequence.Save, triggered=self.save_file)
         self.act_save_as = QAction("Save As…", self, shortcut=QKeySequence.SaveAs, triggered=self.save_file_as)
         self.act_export = QAction("Export Copy…", self, triggered=self.export_copy)
@@ -434,6 +440,8 @@ class MainWindow(QMainWindow):
         for a in (self.act_new, self.act_open, self.act_save, self.act_save_as, self.act_export):
             m_file.addAction(a)
         m_file.addSeparator()
+        m_file.addAction(self.act_close)
+        m_file.addSeparator()
         m_file.addAction(self.act_doc_setup)
         m_file.addSeparator()
         m_export = m_file.addMenu("Export")
@@ -516,6 +524,7 @@ class MainWindow(QMainWindow):
 
     def _set_open_state(self, is_open: bool):
         for a in (self.act_save, self.act_save_as, self.act_export, self.act_doc_setup,
+                  self.act_close,
                   self.act_print, self.act_print_preview, self.act_find,
                   self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr,
                   self.act_page_size, self.act_crop, self.act_edit_mode,
@@ -586,6 +595,11 @@ class MainWindow(QMainWindow):
         paths, _ = QFileDialog.getOpenFileNames(self, "Open PDF(s)", "", "PDF files (*.pdf)")
         for path in paths:
             self.open_path(path)
+
+    def close_current_document(self):
+        """Close the current tab (same as its ✕), honoring unsaved-changes prompts."""
+        if self.tabs.count() > 0:
+            self._on_tab_close(self.tabs.currentIndex())
 
     def open_path(self, path: str):
         """Open one PDF in a new tab (skips if already open: focuses that tab)."""
