@@ -116,16 +116,26 @@ def _font_dirs() -> list[str]:
     sysname = platform.system()
     home = os.path.expanduser("~")
     if sysname == "Darwin":
+        adobe = os.path.join(home, "Library/Application Support/Adobe/CoreSync/plugins/livetype")
         return [
             "/System/Library/Fonts",
             "/Library/Fonts",
             os.path.join(home, "Library/Fonts"),
+            # Adobe Fonts (Creative Cloud activated) — obfuscated .otf/.ttf files
+            os.path.join(adobe, ".r"),
+            os.path.join(adobe, "r"),
         ]
     if sysname == "Windows":
         dirs = [os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")]
         local = os.environ.get("LOCALAPPDATA")
         if local:
             dirs.append(os.path.join(local, r"Microsoft\Windows\Fonts"))
+        for env in ("APPDATA", "LOCALAPPDATA"):
+            base = os.environ.get(env)
+            if base:
+                adobe = os.path.join(base, r"Adobe\CoreSync\plugins\livetype")
+                dirs.append(os.path.join(adobe, "r"))
+                dirs.append(os.path.join(adobe, ".r"))
         return dirs
     # Linux / other
     return [
