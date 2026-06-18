@@ -57,6 +57,23 @@ class Block:
         return [s for line in self.lines for s in line]
 
     @property
+    def flow_text(self) -> str:
+        """The paragraph as one flowing string — soft line-wraps joined with spaces and
+        de-hyphenated, so editing/re-wrapping doesn't reproduce the original hard breaks."""
+        parts = []
+        line_texts = [" ".join(s.text for s in line).strip() for line in self.lines]
+        for i, lt in enumerate(line_texts):
+            if not lt:
+                continue
+            if parts and parts[-1].endswith("-") and lt[:1].islower():
+                parts[-1] = parts[-1][:-1] + lt   # join hyphenated word split across lines
+            elif parts:
+                parts.append(" " + lt)
+            else:
+                parts.append(lt)
+        return "".join(parts)
+
+    @property
     def first_origin(self) -> tuple[float, float]:
         spans = self.lines[0] if self.lines else []
         return spans[0].origin if spans else (self.bbox[0], self.bbox[3])

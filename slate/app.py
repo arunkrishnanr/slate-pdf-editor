@@ -28,8 +28,14 @@ QMenu { background: #2e2e2e; color: #ededed; border: 1px solid #3a3a3a; }
 QMenu::item:selected { background: #ff8431; color: #282828; }
 QStatusBar { background: #1f1f1f; color: #d0d0d0; }
 QStatusBar QLabel { color: #ff8431; }
-QDockWidget { titlebar-close-icon: none; color: #ededed; }
-QDockWidget::title { background: #1f1f1f; padding: 6px; }
+QDockWidget { color: #ededed; }
+QDockWidget::title { background: #1f1f1f; padding: 6px 8px; }
+QDockWidget::close-button, QDockWidget::float-button {
+    background: #2e2e2e; border: 1px solid #4a4a4a; border-radius: 4px; padding: 2px;
+}
+QDockWidget::close-button:hover, QDockWidget::float-button:hover {
+    background: #ff8431; border-color: #ff8431;
+}
 QPushButton { background: #3a3a3a; border: 1px solid #4a4a4a; border-radius: 6px; padding: 6px 12px; color: #ededed; }
 QPushButton:hover { background: #474747; border-color: #ff8431; }
 QPushButton:pressed { background: #ff8431; color: #282828; }

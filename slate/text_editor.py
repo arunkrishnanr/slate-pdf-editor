@@ -88,28 +88,37 @@ def _builtin_for(req: fm.FontRequest) -> str:
 
 
 def _sample_background(page: fitz.Page, rect: fitz.Rect) -> tuple[float, float, float]:
-    """Sample the page just outside a span to guess its background colour."""
-    pad = max(2.0, rect.height * 0.4)
-    probe = fitz.Rect(rect.x0, rect.y0 - pad, rect.x1, rect.y0 - 0.5)
-    probe = probe & page.rect
-    if probe.is_empty or probe.height < 0.5:
-        return (1.0, 1.0, 1.0)
-    try:
-        pix = page.get_pixmap(clip=probe, alpha=False)
-        if pix.width == 0 or pix.height == 0:
-            return (1.0, 1.0, 1.0)
-        # Average a thin strip; good enough for solid backgrounds.
-        n = pix.width * pix.height
-        r = g = b = 0
-        samples = pix.samples
-        stride = pix.n
+    """Guess the page background under a span by taking the *most common* colour in the
+    thin margins just outside the rectangle (mode, not average — so stray text pixels in
+    the strip don't tint the result). Near-white is snapped to pure white so the refill
+    never shows as a faint box."""
+    from collections import Counter
+    pr = page.rect
+    pad = 3.0
+    strips = [
+        fitz.Rect(rect.x0, rect.y0 - pad, rect.x1, rect.y0),               # above
+        fitz.Rect(rect.x0, rect.y1, rect.x1, rect.y1 + pad),              # below
+        fitz.Rect(rect.x0 - pad, rect.y0, rect.x0, rect.y1),              # left
+        fitz.Rect(rect.x1, rect.y0, rect.x1 + pad, rect.y1),             # right
+    ]
+    counter: Counter = Counter()
+    for s in strips:
+        s = s & pr
+        if s.is_empty or s.width < 0.5 or s.height < 0.5:
+            continue
+        try:
+            pix = page.get_pixmap(clip=s, alpha=False)
+        except Exception:
+            continue
+        samples, stride = pix.samples, pix.n
         for i in range(0, len(samples), stride):
-            r += samples[i]
-            g += samples[i + 1]
-            b += samples[i + 2]
-        return (r / n / 255.0, g / n / 255.0, b / n / 255.0)
-    except Exception:
+            counter[(samples[i], samples[i + 1], samples[i + 2])] += 1
+    if not counter:
         return (1.0, 1.0, 1.0)
+    r, g, b = counter.most_common(1)[0][0]
+    if r >= 244 and g >= 244 and b >= 244:   # near-white -> snap to white
+        return (1.0, 1.0, 1.0)
+    return (r / 255.0, g / 255.0, b / 255.0)
 
 
 class TextEditor:

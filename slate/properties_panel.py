@@ -123,6 +123,7 @@ class PropertiesPanel(QWidget):
         self._color = QColor.fromRgbF(*sel.color)
         self._refresh_color_btn()
         self.align_combo.setCurrentIndex(sel.align if 0 <= sel.align < 4 else 0)
+        self._is_paragraph = sel.is_paragraph
         self.whole_para.setVisible(sel.is_paragraph)
         self.whole_para.setChecked(sel.is_paragraph)
 
@@ -157,6 +158,6 @@ class PropertiesPanel(QWidget):
             self.bold_btn.isChecked(),
             self.italic_btn.isChecked(),
             self.current_color_rgb(),
-            self.whole_para.isVisible() and self.whole_para.isChecked(),
+            getattr(self, "_is_paragraph", False) and self.whole_para.isChecked(),
             self.align_combo.currentIndex(),
         )

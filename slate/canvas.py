@@ -77,7 +77,6 @@ class PageView(QGraphicsView):
     commitBlockEdit = Signal(object, str)   # (Block, new_text) — paragraph reflow
     selected = Signal(object, object)       # (TextSpan|None, Block|None) for properties panel
     addTextRequested = Signal(float, float) # PDF point x, y
-    textBoxRequested = Signal(tuple)        # (x0, y0, x1, y1) for a new text box
     textBoxCommit = Signal(tuple, str, float)  # (rect_pts, text, size) live text box
     ocrRegionRequested = Signal(tuple)      # (x0, y0, x1, y1) in PDF points
     rectToolFinished = Signal(object, tuple)  # (Mode, rect_pts) for image/redact/markup/shape
@@ -604,13 +603,17 @@ class PageView(QGraphicsView):
         geo = QRect(view_tl, view_br).normalized()
         geo.adjust(-4, -4, 8, 40)  # room to grow downward as the paragraph reflows
 
+        # Edit the paragraph as one flowing string (no hard line-breaks), so re-wrapping
+        # on commit doesn't reproduce the original soft breaks.
+        flow = getattr(block, "flow_text", None) or block.text.replace("\n", " ")
+        self._block_initial = flow
         editor = _ParagraphEdit(self.viewport())
-        editor.setPlainText(block.text)
+        editor.setPlainText(flow)  # QPlainTextEdit wraps at widget width by default
         editor.setGeometry(geo)
         px = max(9, int(block.size * self._zoom * 0.85))
         editor.setStyleSheet(
             f"QPlainTextEdit {{ font-size: {px}px; padding: 2px 4px; "
-            f"border: 2px solid #f5a623; background: #fffdf3; color: #111; }}"
+            f"border: 2px solid #ff8431; background: #fffaf2; color: #111; }}"
         )
         editor.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         editor.selectAll()
@@ -630,7 +633,7 @@ class PageView(QGraphicsView):
         self._block_editor.deleteLater()
         self._block_editor = None
         self._editing_block = None
-        if new_text != block.text:
+        if new_text != getattr(self, "_block_initial", block.text):
             self.commitBlockEdit.emit(block, new_text)
 
     # -- live text box (type directly on canvas) ---------------------------

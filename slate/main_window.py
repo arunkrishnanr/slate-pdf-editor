@@ -70,7 +70,6 @@ class DocumentTab(QWidget):
         v.selected.connect(main._on_selection)
         v.spanActivated.connect(main._on_span_activated)
         v.addTextRequested.connect(main._on_add_text)
-        v.textBoxRequested.connect(main._on_text_box)
         v.textBoxCommit.connect(main._on_textbox_commit)
         v.ocrRegionRequested.connect(main._on_ocr_region)
         v.rectToolFinished.connect(main._on_rect_tool)
@@ -108,7 +107,8 @@ class MainWindow(QMainWindow):
         self.pages = PagesPanel()
         dock = QDockWidget("Pages", self)
         dock.setWidget(self.pages)
-        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+                         | QDockWidget.DockWidgetClosable)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.pages_dock = dock
         self.pages.pageSelected.connect(self.goto_page)
@@ -122,7 +122,8 @@ class MainWindow(QMainWindow):
         self.props = PropertiesPanel()
         pdock = QDockWidget("Properties", self)
         pdock.setWidget(self.props)
-        pdock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        pdock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable
+                          | QDockWidget.DockWidgetClosable)
         self.addDockWidget(Qt.RightDockWidgetArea, pdock)
         self.props_dock = pdock
         self.props.styleApplied.connect(self._on_style_applied)
@@ -276,10 +277,6 @@ class MainWindow(QMainWindow):
         self.act_edit_mode.setChecked(False)
         self.act_edit_mode.toggled.connect(self._toggle_edit_mode)
 
-        self.act_props_panel = QAction("Properties Panel", self, checkable=True)
-        self.act_props_panel.setChecked(True)
-        self.act_props_panel.toggled.connect(self._toggle_properties)
-
         # Interactive table editing (shown only while Table Detection is on)
         self.act_table_add_row = QAction("＋ Row", self, triggered=self._table_add_row)
         self.act_table_add_col = QAction("＋ Column", self, triggered=self._table_add_col)
@@ -375,9 +372,6 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_table_add_row)
         tb.addAction(self.act_table_add_col)
         tb.addAction(self.act_table_apply)
-        self.sw_props = SwitchButton("Properties", checked=True)
-        self.sw_props.toggled.connect(self._toggle_properties)
-        tb.addWidget(self.sw_props)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -487,14 +481,14 @@ class MainWindow(QMainWindow):
         m_view = bar.addMenu("View")
         m_view.addAction(self.act_edit_mode)
         m_view.addSeparator()
-        for a in (self.act_zoom_in, self.act_zoom_out, self.act_fit_window, self.act_prev, self.act_next):
+        for a in (self.act_zoom_in, self.act_zoom_out, self.act_fit_window):
             m_view.addAction(a)
         m_view.addSeparator()
         m_view.addAction(self.act_para_detect)
         m_view.addAction(self.act_table_detect)
-        m_view.addAction(self.act_props_panel)
         m_view.addSeparator()
         m_view.addAction(self.pages_dock.toggleViewAction())
+        m_view.addAction(self.props_dock.toggleViewAction())
 
         m_help = bar.addMenu("Help")
         m_help.addAction(self.act_user_guide)
@@ -524,7 +518,8 @@ class MainWindow(QMainWindow):
         for a in (self.act_save, self.act_save_as, self.act_export,
                   self.act_print, self.act_print_preview, self.act_find,
                   self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr,
-                  self.act_page_size, self.act_crop, self.act_edit_mode, self.act_table_detect,
+                  self.act_page_size, self.act_crop, self.act_edit_mode,
+                  self.act_para_detect, self.act_table_detect,
                   self.act_insert_image, self.act_insert_pdf, self.act_insert_blank,
                   self.act_duplicate_page,
                   self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike,
@@ -856,22 +851,6 @@ class MainWindow(QMainWindow):
         self._refresh_thumbnail(block.page_index)
         self._update_title()
 
-    def _on_text_box(self, rect_pts: tuple):
-        dlg = AddTextDialog(fm.index().families(), self)
-        dlg.setWindowTitle("Text box")
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        text, family, size = dlg.values()
-        if not text.strip():
-            return
-        req = fm.parse_pdf_fontname(family)
-        self._snapshot()
-        result = self.editor.add_text_box(self.current_page, rect_pts, text, req, size=size)
-        self.status(result.message)
-        self.render_current_page()
-        self._refresh_thumbnail(self.current_page)
-        self._update_title()
-
     def _on_style_applied(self, family, size, bold, italic, color, whole_paragraph, align):
         """Properties-panel Apply: restyle the current selection with a chosen font."""
         req = fm.FontRequest(family, family, bold, italic)
@@ -1048,7 +1027,7 @@ class MainWindow(QMainWindow):
         printer.setFromTo(1, self.document.page_count)
         dlg = QPrintDialog(printer, self)
         dlg.setWindowTitle("Print")
-        if dlg.exec() != QDialog.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         self.status("Printing…")
         QApplication.processEvents()
@@ -1383,11 +1362,6 @@ class MainWindow(QMainWindow):
             self.render_current_page()
         self.status("Table detection on — drag dividers to resize; use Add Row/Column, then Apply."
                     if on else "Table detection off.")
-
-    def _toggle_properties(self, on: bool):
-        self._sync_toggle(self.sw_props, self.act_props_panel, on)
-        self.props_dock.setVisible(on)
-        self.status("Properties panel shown." if on else "Properties panel hidden.")
 
     # -- interactive table editing -----------------------------------------
 
