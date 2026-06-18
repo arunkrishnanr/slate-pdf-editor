@@ -9,7 +9,12 @@ line can be removed and a corrected line dropped into the same spot.
 
 from __future__ import annotations
 
+import io
+import json
+import base64
 import shutil
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
@@ -50,6 +55,37 @@ def configure_tesseract(path: Optional[str]):
         pytesseract.pytesseract.tesseract_cmd = path
 
 
+# ---------------------------------------------------------------------------
+# Cloud OCR (OCR.space) — free AI engine, works with the public demo key so no
+# API-key setup is needed. A personal free key can be supplied for higher limits.
+# ---------------------------------------------------------------------------
+
+OCR_SPACE_URL = "https://api.ocr.space/parse/image"
+OCR_SPACE_DEMO_KEY = "helloworld"   # public free key (rate-limited, ~1 MB images)
+CLOUD_DPI = 150                     # keep the region image small enough for the free tier
+_api_key = OCR_SPACE_DEMO_KEY
+
+
+def set_api_key(key: Optional[str]):
+    global _api_key
+    _api_key = key.strip() if key and key.strip() else OCR_SPACE_DEMO_KEY
+
+
+def cloud_available() -> bool:
+    """A quick reachability check for the OCR.space endpoint."""
+    try:
+        urllib.request.urlopen("https://api.ocr.space", timeout=4)
+        return True
+    except Exception:
+        try:
+            # Some hosts block the bare domain; treat DNS resolve as 'maybe'.
+            import socket
+            socket.gethostbyname("api.ocr.space")
+            return True
+        except Exception:
+            return False
+
+
 @dataclass
 class OcrWord:
     text: str
@@ -57,6 +93,73 @@ class OcrWord:
     conf: float
     est_size: float
     guessed_family: str
+
+
+def ocr_space_region(document: PdfDocument, page_index: int,
+                     clip_pts: tuple, lang: str = "eng") -> list["OcrWord"]:
+    """Recognize a page region with OCR.space, returning positioned words."""
+    page = document.doc[page_index]
+    zoom = CLOUD_DPI / 72.0
+    clip = fitz.Rect(clip_pts)
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+    png = pix.tobytes("png")
+    # Stay under the free-tier ~1 MB limit; downscale if needed.
+    while len(png) > 1024 * 1024 and zoom > 0.5:
+        zoom *= 0.8
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+        png = pix.tobytes("png")
+
+    payload = urllib.parse.urlencode({
+        "apikey": _api_key,
+        "base64Image": "data:image/png;base64," + base64.b64encode(png).decode(),
+        "language": lang,
+        "isOverlayRequired": "true",
+        "OCREngine": "2",       # the better AI engine
+        "scale": "true",
+    }).encode()
+    req = urllib.request.Request(OCR_SPACE_URL, data=payload)
+    with urllib.request.urlopen(req, timeout=40) as resp:
+        result = json.loads(resp.read().decode())
+
+    if result.get("IsErroredOnProcessing"):
+        err = result.get("ErrorMessage") or "Cloud OCR failed"
+        raise RuntimeError(err[0] if isinstance(err, list) else str(err))
+
+    ox, oy = clip_pts[0], clip_pts[1]
+    words: list[OcrWord] = []
+    for pr in result.get("ParsedResults", []) or []:
+        overlay = pr.get("TextOverlay") or {}
+        for line in overlay.get("Lines", []) or []:
+            for w in line.get("Words", []) or []:
+                x = w["Left"] / zoom + ox
+                y = w["Top"] / zoom + oy
+                ww = w["Width"] / zoom
+                hh = w["Height"] / zoom
+                words.append(OcrWord(
+                    text=w.get("WordText", ""), bbox_pts=(x, y, x + ww, y + hh),
+                    conf=90.0, est_size=round(hh * 0.9, 1), guessed_family="Helvetica"))
+    return words
+
+
+def recognize_region(document: PdfDocument, page_index: int, clip_pts: tuple,
+                     prefer_cloud: bool = True, lang: str = "eng") -> tuple[list["OcrWord"], str]:
+    """Recognize a region, preferring cloud AI OCR and falling back to Tesseract.
+
+    Returns (words, engine_name).
+    """
+    errors = []
+    if prefer_cloud:
+        try:
+            words = ocr_space_region(document, page_index, clip_pts, lang=lang)
+            if words:
+                return words, "OCR.space (cloud AI)"
+            errors.append("cloud returned no text")
+        except Exception as e:
+            errors.append(f"cloud: {e}")
+    if tesseract_available():
+        words = ocr_page_region(document, page_index, clip_pts, lang)
+        return words, "Tesseract (offline)"
+    raise RuntimeError("No OCR engine succeeded. " + "; ".join(errors))
 
 
 def _guess_family_serif(height_px: float) -> str:

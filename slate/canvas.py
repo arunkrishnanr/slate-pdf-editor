@@ -20,13 +20,14 @@ from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QRect
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QLineEdit,
-    QGraphicsRectItem, QGraphicsLineItem, QPlainTextEdit,
+    QGraphicsRectItem, QGraphicsLineItem, QPlainTextEdit, QToolTip,
 )
 
 from .pdf_document import TextSpan
 
 
 class Mode(Enum):
+    VIEW = auto()          # read-only: no editing interactions
     SELECT = auto()
     ADD_TEXT = auto()
     TEXT_BOX = auto()
@@ -77,6 +78,7 @@ class PageView(QGraphicsView):
     selected = Signal(object, object)       # (TextSpan|None, Block|None) for properties panel
     addTextRequested = Signal(float, float) # PDF point x, y
     textBoxRequested = Signal(tuple)        # (x0, y0, x1, y1) for a new text box
+    textBoxCommit = Signal(tuple, str, float)  # (rect_pts, text, size) live text box
     ocrRegionRequested = Signal(tuple)      # (x0, y0, x1, y1) in PDF points
     rectToolFinished = Signal(object, tuple)  # (Mode, rect_pts) for image/redact/markup/shape
     pointToolClicked = Signal(object, float, float)  # (Mode, x, y) for note
@@ -105,6 +107,8 @@ class PageView(QGraphicsView):
         self._editing_span: Optional[TextSpan] = None
         self._block_editor: Optional[QPlainTextEdit] = None
         self._editing_block = None
+        self._textbox_rect = None
+        self._textbox_size = 12.0
 
         self._dragging = False
         self._drag_origin = QPointF()      # scene coords of the drag start
@@ -112,6 +116,10 @@ class PageView(QGraphicsView):
 
         self._ink_points: list = []
         self._ink_items: list = []
+
+        self._notes: list = []     # [(bbox, text)] for hover tooltips
+        self._tables: list = []    # [bbox] detected table boundaries
+        self._table_items: list = []
 
         self.setMouseTracking(True)
 
@@ -147,11 +155,42 @@ class PageView(QGraphicsView):
         self._search_item = None
         self._preview_item = None
         self._dragging = False
+        self._table_items = []
+        self._notes = []
+        self._tables = []
         self._pixmap_item = self._scene.addPixmap(pix)
         self._scene.setSceneRect(QRectF(pix.rect()))
 
     def set_zoom(self, zoom: float):
         self._zoom = zoom
+
+    def set_overlays(self, notes: list, tables: list):
+        """Notes -> hover tooltips; tables -> drawn boundary overlays."""
+        self._notes = notes or []
+        for it in self._table_items:
+            try:
+                self._scene.removeItem(it)
+            except Exception:
+                pass
+        self._table_items = []
+        self._tables = tables or []
+        for bbox in self._tables:
+            item = QGraphicsRectItem(self._bbox_scene_rect(bbox))
+            pen = QPen(QColor(0xFF, 0x84, 0x31), 1.6)
+            pen.setStyle(Qt.DashLine)
+            item.setPen(pen)
+            item.setBrush(QBrush(QColor(0xFF, 0x84, 0x31, 22)))
+            item.setZValue(8)
+            self._scene.addItem(item)
+            self._table_items.append(item)
+
+    def _note_at(self, scene_pt: QPointF):
+        x, y = scene_pt.x() / self._zoom, scene_pt.y() / self._zoom
+        for bbox, text in self._notes:
+            x0, y0, x1, y1 = bbox
+            if x0 - 2 <= x <= x1 + 2 and y0 - 2 <= y <= y1 + 2:
+                return text
+        return None
 
     def set_paragraph_detection(self, on: bool):
         self._para_detect = on
@@ -214,6 +253,10 @@ class PageView(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         scene_pt = self.mapToScene(event.position().toPoint())
+        # Hovering a sticky note shows its text (in any mode).
+        note = self._note_at(scene_pt) if self._notes else None
+        if note:
+            QToolTip.showText(event.globalPosition().toPoint(), note, self)
         if self._mode == Mode.SELECT:
             span = self._span_at(scene_pt)
             self._show_hover(span)
@@ -273,14 +316,19 @@ class PageView(QGraphicsView):
                         max(p0.x(), p1.x()) / self._zoom, max(p0.y(), p1.y()) / self._zoom)
             w = rect_pts[2] - rect_pts[0]
             h = rect_pts[3] - rect_pts[1]
-            # Text-markup tools accept a thin horizontal swipe; box tools need real area.
-            markup = self._mode in (Mode.HIGHLIGHT, Mode.UNDERLINE, Mode.STRIKE)
-            ok = (w > 3 and h > 3) or (markup and w > 6)
+            # Linear tools (line/underline/strike) only need length in one direction;
+            # a highlight accepts a thin horizontal swipe; box tools need real area.
+            if self._mode in (Mode.SHAPE_LINE, Mode.UNDERLINE, Mode.STRIKE):
+                ok = max(w, h) > 4
+            elif self._mode == Mode.HIGHLIGHT:
+                ok = w > 6
+            else:
+                ok = w > 3 and h > 3
             if ok:
                 if self._mode == Mode.OCR_REGION:
                     self.ocrRegionRequested.emit(rect_pts)
                 elif self._mode == Mode.TEXT_BOX:
-                    self.textBoxRequested.emit(rect_pts)
+                    self._begin_textbox_edit(rect_pts)
                 else:
                     self.rectToolFinished.emit(self._mode, rect_pts)
         elif self._mode == Mode.INK and self._ink_points:
@@ -444,6 +492,7 @@ class PageView(QGraphicsView):
             self._block_editor.deleteLater()
             self._block_editor = None
         self._editing_block = None
+        self._textbox_rect = None
 
     # -- paragraph (multi-line block) editing ------------------------------
 
@@ -484,6 +533,45 @@ class PageView(QGraphicsView):
         self._editing_block = None
         if new_text != block.text:
             self.commitBlockEdit.emit(block, new_text)
+
+    # -- live text box (type directly on canvas) ---------------------------
+
+    def _begin_textbox_edit(self, rect_pts):
+        self._cancel_inline_edit()
+        self._textbox_rect = rect_pts
+        rect = self._bbox_scene_rect(rect_pts)
+        view_tl = self.mapFromScene(rect.topLeft())
+        view_br = self.mapFromScene(rect.bottomRight())
+        geo = QRect(view_tl, view_br).normalized()
+
+        size = max(8.0, min(48.0, (rect_pts[3] - rect_pts[1]) * 0.5))
+        self._textbox_size = size
+        editor = _ParagraphEdit(self.viewport())
+        editor.setPlaceholderText("Type here…  (Ctrl/⌘+Enter to place, Esc to cancel)")
+        editor.setGeometry(geo)
+        px = max(10, int(size * self._zoom * 0.9))
+        editor.setStyleSheet(
+            f"QPlainTextEdit {{ font-size: {px}px; padding: 2px 4px; "
+            f"border: 2px dashed #ff8431; background: #fffaf2; color: #111; }}"
+        )
+        editor.committed.connect(self._commit_textbox)
+        editor.cancelled.connect(self._cancel_inline_edit)
+        editor.show()
+        editor.setFocus()
+        self._block_editor = editor  # reuse the same slot/cleanup
+
+    def _commit_textbox(self):
+        if self._block_editor is None or self._textbox_rect is None:
+            return
+        text = self._block_editor.toPlainText()
+        rect_pts = self._textbox_rect
+        size = self._textbox_size
+        self._block_editor.blockSignals(True)
+        self._block_editor.deleteLater()
+        self._block_editor = None
+        self._textbox_rect = None
+        if text.strip():
+            self.textBoxCommit.emit(rect_pts, text, size)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:

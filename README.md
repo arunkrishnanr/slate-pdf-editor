@@ -27,6 +27,16 @@ This is the same mechanism real editors use: the actual content of the PDF chang
 
 - **Multiple PDFs in tabs** — open many files at once; each tab keeps its own pages, zoom,
   undo history and edits. Drag-reorder or close tabs; re-opening a file focuses its tab.
+- **Edit ⇄ View-only** — one toggle swaps between full editing and a read-only viewing mode.
+- **Zoom bar** — a bottom slider with − / + on each side, plus **Fit to Window** and
+  preset levels (25–200%); type any custom percentage.
+- **Structure overlays** — toggle **Paragraph Detection** and **Table Detection** on/off
+  (detected tables are outlined).
+- **Live text boxes** — draw a box and type directly on the page (no dialog).
+- **Cloud AI OCR** — scanned text is read with OCR.space's free AI engine (no key needed),
+  falling back to offline Tesseract. The original raster text is **removed and the
+  background reconstructed with OpenCV inpainting**, then the corrected text is placed in
+  the same spot — including over textured backgrounds.
 - **Edit text** — click any line; an edit box appears right over it. Enter commits, Esc cancels.
 - **Structure recognition** — Slate classifies each text block as **Title / Heading /
   Paragraph / Line**. Click a paragraph and the *whole* paragraph opens for editing and

@@ -357,9 +357,33 @@ class PdfDocument:
 
     def add_note(self, page_index: int, point: tuple, text: str):
         page = self.doc[page_index]
-        annot = page.add_text_annot(fitz.Point(*point), text)
+        annot = page.add_text_annot(fitz.Point(*point), text, icon="Note")
+        annot.set_colors(stroke=(1.0, 0.52, 0.19))  # theme orange, so it's easy to spot
+        annot.set_info(content=text)
         annot.update()
         self.dirty = True
+
+    def detect_tables(self, page_index: int) -> list[tuple]:
+        """Return bounding boxes of tables detected on a page (PyMuPDF find_tables)."""
+        out = []
+        try:
+            finder = self.doc[page_index].find_tables()
+            for t in finder.tables:
+                out.append(tuple(t.bbox))
+        except Exception:
+            pass
+        return out
+
+    def note_annotations(self, page_index: int) -> list[tuple]:
+        """Return [(bbox, text), ...] for sticky-note annotations on a page."""
+        out = []
+        try:
+            for annot in self.doc[page_index].annots(types=(fitz.PDF_ANNOT_TEXT,)):
+                info = annot.info
+                out.append((tuple(annot.rect), info.get("content", "")))
+        except Exception:
+            pass
+        return out
 
     def add_shape(self, page_index: int, rect_pts: tuple, kind: str,
                   color=(0.85, 0.1, 0.1), width: float = 1.5):

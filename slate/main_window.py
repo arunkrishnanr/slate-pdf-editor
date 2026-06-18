@@ -11,7 +11,7 @@ from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QDockWidget, QToolBar, QLabel,
     QStatusBar, QApplication, QComboBox, QWidget, QSizePolicy, QDialog,
-    QInputDialog, QLineEdit, QTabWidget, QVBoxLayout,
+    QInputDialog, QLineEdit, QTabWidget, QVBoxLayout, QSlider, QToolButton,
 )
 
 from . import __app_name__, __version__
@@ -70,6 +70,7 @@ class DocumentTab(QWidget):
         v.spanActivated.connect(main._on_span_activated)
         v.addTextRequested.connect(main._on_add_text)
         v.textBoxRequested.connect(main._on_text_box)
+        v.textBoxCommit.connect(main._on_textbox_commit)
         v.ocrRegionRequested.connect(main._on_ocr_region)
         v.rectToolFinished.connect(main._on_rect_tool)
         v.pointToolClicked.connect(main._on_point_tool)
@@ -86,6 +87,8 @@ class MainWindow(QMainWindow):
         self.resize(1280, 860)
 
         self._para_detect = True       # global toggle, applies to all tabs
+        self._table_detect = False     # table-boundary overlay toggle
+        self._view_only = False        # edit vs read-only mode
         self._UNDO_CAP = 25
         self._find_dialog: FindReplaceDialog | None = None
         self._null_doc = PdfDocument()  # stand-in when no tab is open
@@ -126,6 +129,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_toolbar()
         self._build_menu()
+        self._build_zoom_bar()
         self.setStatusBar(QStatusBar())
         self._set_open_state(False)
         self.status("Open a PDF to begin — File ▸ Open  (⌘O)")
@@ -192,6 +196,8 @@ class MainWindow(QMainWindow):
     def _new_tab(self) -> DocumentTab:
         t = DocumentTab(self)
         t.view.set_paragraph_detection(self._para_detect)
+        if self._view_only:
+            t.view.set_mode(Mode.VIEW)
         idx = self.tabs.addTab(t, "Untitled")
         self.tabs.setCurrentIndex(idx)
         return t
@@ -217,6 +223,9 @@ class MainWindow(QMainWindow):
         self.render_current_page()
         self._update_undo_actions()
         self._update_title()
+        self._sync_zoom_ui()
+        if self._view_only:
+            self.view.set_mode(Mode.VIEW)
 
     def _on_tab_close(self, index: int):
         t = self.tabs.widget(index)
@@ -257,7 +266,16 @@ class MainWindow(QMainWindow):
         self.act_para_detect.setChecked(True)
         self.act_para_detect.toggled.connect(self._toggle_paragraph_detection)
 
-        self.act_mode_select = QAction("Edit Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
+        self.act_table_detect = QAction("Table Detection", self, checkable=True)
+        self.act_table_detect.setChecked(False)
+        self.act_table_detect.toggled.connect(self._toggle_table_detection)
+
+        # Edit ⇄ View-only swap (checked = Edit mode)
+        self.act_edit_mode = QAction("Edit Mode", self, checkable=True)
+        self.act_edit_mode.setChecked(True)
+        self.act_edit_mode.toggled.connect(self._toggle_edit_mode)
+
+        self.act_mode_select = QAction("Select", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
         self.act_mode_add = QAction("Add Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.ADD_TEXT))
         self.act_mode_box = QAction("Text Box", self, checkable=True, triggered=lambda: self.set_mode(Mode.TEXT_BOX))
         self.act_mode_ocr = QAction("OCR Region", self, checkable=True, triggered=lambda: self.set_mode(Mode.OCR_REGION))
@@ -290,8 +308,9 @@ class MainWindow(QMainWindow):
 
         self.act_prev = QAction("◀", self, triggered=self.prev_page)
         self.act_next = QAction("▶", self, triggered=self.next_page)
-        self.act_zoom_in = QAction("Zoom +", self, shortcut=QKeySequence.ZoomIn, triggered=lambda: self._on_zoom_factor(1.15))
-        self.act_zoom_out = QAction("Zoom −", self, shortcut=QKeySequence.ZoomOut, triggered=lambda: self._on_zoom_factor(1/1.15))
+        self.act_zoom_in = QAction("Zoom In", self, shortcut=QKeySequence.ZoomIn, triggered=lambda: self._on_zoom_factor(1.15))
+        self.act_zoom_out = QAction("Zoom Out", self, shortcut=QKeySequence.ZoomOut, triggered=lambda: self._on_zoom_factor(1/1.15))
+        self.act_fit_window = QAction("Fit to Window", self, triggered=self.zoom_fit_window)
 
         self.act_user_guide = QAction("User Guide", self, shortcut=QKeySequence.HelpContents,
                                       triggered=self.show_help)
@@ -314,7 +333,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_redo)
         tb.addAction(self.act_find)
         tb.addSeparator()
-        tb.addAction(self.act_mode_select)
+        tb.addAction(self.act_edit_mode)   # Edit ⇄ View-only swap
         tb.addAction(self.act_mode_add)
         tb.addAction(self.act_mode_box)
         tb.addAction(self.act_mode_ocr)
@@ -326,10 +345,8 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.page_label)
         tb.addAction(self.act_next)
         tb.addSeparator()
-        tb.addAction(self.act_zoom_out)
-        tb.addAction(self.act_zoom_in)
-        tb.addSeparator()
-        tb.addAction(self.act_para_detect)  # checkable toggle button (orange when on)
+        tb.addAction(self.act_para_detect)   # checkable toggle button (orange when on)
+        tb.addAction(self.act_table_detect)  # table-boundary overlay toggle
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -337,6 +354,53 @@ class MainWindow(QMainWindow):
         self.font_status = QLabel("")
         self.font_status.setStyleSheet("color: #cfd3da; padding-right: 8px;")
         tb.addWidget(self.font_status)
+
+    ZOOM_PRESETS = [25, 50, 75, 100, 125, 150, 175, 200]
+
+    def _build_zoom_bar(self):
+        """A bottom bar with: − [slider] +  and a Fit/percentage selector."""
+        bar = QToolBar("Zoom")
+        bar.setMovable(False)
+        self.addToolBar(Qt.BottomToolBarArea, bar)
+
+        self.btn_zoom_minus = QToolButton()
+        self.btn_zoom_minus.setText("−")
+        self.btn_zoom_minus.setToolTip("Zoom out")
+        self.btn_zoom_minus.clicked.connect(lambda: self._on_zoom_factor(1 / 1.15))
+        bar.addWidget(self.btn_zoom_minus)
+
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(25, 300)      # 25% .. 300%
+        self.zoom_slider.setValue(150)
+        self.zoom_slider.setFixedWidth(220)
+        self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
+        bar.addWidget(self.zoom_slider)
+
+        self.btn_zoom_plus = QToolButton()
+        self.btn_zoom_plus.setText("+")
+        self.btn_zoom_plus.setToolTip("Zoom in")
+        self.btn_zoom_plus.clicked.connect(lambda: self._on_zoom_factor(1.15))
+        bar.addWidget(self.btn_zoom_plus)
+
+        self.zoom_combo = QComboBox()
+        self.zoom_combo.setEditable(True)
+        self.zoom_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.zoom_combo.setFixedWidth(130)
+        self.zoom_combo.addItem("Fit to Window", "fit")
+        for p in self.ZOOM_PRESETS:
+            self.zoom_combo.addItem(f"{p}%", p)
+        self.zoom_combo.setCurrentText("150%")
+        self.zoom_combo.activated.connect(self._on_zoom_combo)
+        self.zoom_combo.lineEdit().editingFinished.connect(self._on_zoom_typed)
+        bar.addWidget(self.zoom_combo)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bar.addWidget(spacer)
+        self.mode_status = QLabel("Edit Mode")
+        self.mode_status.setStyleSheet("color: #ff8431; padding-right: 10px; font-weight: 600;")
+        bar.addWidget(self.mode_status)
+        self._zoom_bar = bar
 
     def _build_menu(self):
         bar = self.menuBar()
@@ -363,7 +427,9 @@ class MainWindow(QMainWindow):
         m_edit.addAction(self.act_find)
 
         m_tools = bar.addMenu("Tools")
-        for a in (self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr):
+        m_tools.addAction(self.act_edit_mode)
+        m_tools.addSeparator()
+        for a in (self.act_mode_add, self.act_mode_box, self.act_mode_ocr):
             m_tools.addAction(a)
         m_tools.addSeparator()
         m_tools.addAction(self.act_crop)
@@ -384,10 +450,13 @@ class MainWindow(QMainWindow):
         m_page.addAction(self.act_page_size)
 
         m_view = bar.addMenu("View")
-        for a in (self.act_zoom_in, self.act_zoom_out, self.act_prev, self.act_next):
+        m_view.addAction(self.act_edit_mode)
+        m_view.addSeparator()
+        for a in (self.act_zoom_in, self.act_zoom_out, self.act_fit_window, self.act_prev, self.act_next):
             m_view.addAction(a)
         m_view.addSeparator()
         m_view.addAction(self.act_para_detect)
+        m_view.addAction(self.act_table_detect)
         m_view.addSeparator()
         m_view.addAction(self.pages_dock.toggleViewAction())
         m_view.addAction(self.props_dock.toggleViewAction())
@@ -420,7 +489,7 @@ class MainWindow(QMainWindow):
         for a in (self.act_save, self.act_save_as, self.act_export,
                   self.act_print, self.act_print_preview, self.act_find,
                   self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr,
-                  self.act_page_size, self.act_crop,
+                  self.act_page_size, self.act_crop, self.act_edit_mode, self.act_table_detect,
                   self.act_insert_image, self.act_insert_pdf, self.act_insert_blank,
                   self.act_duplicate_page,
                   self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike,
@@ -428,8 +497,13 @@ class MainWindow(QMainWindow):
                   self.act_redact,
                   self.act_export_images, self.act_export_text,
                   self.act_encrypt, self.act_remove_pw,
-                  self.act_prev, self.act_next, self.act_zoom_in, self.act_zoom_out):
+                  self.act_prev, self.act_next, self.act_zoom_in, self.act_zoom_out,
+                  self.act_fit_window):
             a.setEnabled(is_open)
+        # In View-Only mode, keep editing tools disabled even with a document open.
+        if is_open and self._view_only:
+            for a in self._editing_actions():
+                a.setEnabled(False)
 
     def status(self, msg: str, timeout: int = 0):
         self.statusBar().showMessage(msg, timeout)
@@ -564,6 +638,9 @@ class MainWindow(QMainWindow):
         spans = self.document.spans_on_page(self.current_page)
         self._blocks = struct.analyze_page(self.document, self.current_page) if self._para_detect else []
         self.view.set_page(png, self.zoom, self.current_page, spans, self._blocks)
+        notes = self.document.note_annotations(self.current_page)
+        tables = self.document.detect_tables(self.current_page) if self._table_detect else []
+        self.view.set_overlays(notes, tables)
         self.props.show_selection(None)
         self._sel_span = self._sel_block = None
         w, h = self.document.page_size(self.current_page)
@@ -588,9 +665,64 @@ class MainWindow(QMainWindow):
     def next_page(self):
         self.goto_page(min(self.document.page_count - 1, self.current_page + 1))
 
-    def _on_zoom_factor(self, factor: float):
-        self.zoom = max(0.3, min(6.0, self.zoom * factor))
+    def _set_zoom(self, zoom: float, sync: bool = True):
+        if self.tab() is None:
+            return
+        self.zoom = max(0.25, min(3.0, zoom))
         self.render_current_page()
+        if sync:
+            self._sync_zoom_ui()
+
+    def _on_zoom_factor(self, factor: float):
+        self._set_zoom(self.zoom * factor)
+
+    def _on_zoom_slider(self, value: int):
+        self._set_zoom(value / 100.0, sync=False)
+        self._update_zoom_text()
+
+    def _on_zoom_combo(self, index: int):
+        data = self.zoom_combo.itemData(index)
+        if data == "fit":
+            self.zoom_fit_window()
+        elif data is not None:
+            self._set_zoom(int(data) / 100.0)
+
+    def _on_zoom_typed(self):
+        txt = self.zoom_combo.currentText().strip().rstrip("%")
+        try:
+            self._set_zoom(float(txt) / 100.0)
+        except ValueError:
+            self._sync_zoom_ui()
+
+    def zoom_fit_window(self):
+        if self.tab() is None:
+            return
+        w, h = self.document.page_size(self.current_page)
+        vp = self.view.viewport().size()
+        if w <= 0 or h <= 0:
+            return
+        z = min((vp.width() - 24) / w, (vp.height() - 24) / h)
+        self._set_zoom(z, sync=False)
+        self._sync_zoom_ui(fit=True)
+
+    def _sync_zoom_ui(self, fit: bool = False):
+        pct = int(round(self.zoom * 100))
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(max(25, min(300, pct)))
+        self.zoom_slider.blockSignals(False)
+        self.zoom_combo.blockSignals(True)
+        self.zoom_combo.lineEdit().blockSignals(True)
+        self.zoom_combo.setCurrentText("Fit to Window" if fit else f"{pct}%")
+        self.zoom_combo.lineEdit().blockSignals(False)
+        self.zoom_combo.blockSignals(False)
+
+    def _update_zoom_text(self):
+        pct = int(round(self.zoom * 100))
+        self.zoom_combo.blockSignals(True)
+        self.zoom_combo.lineEdit().blockSignals(True)
+        self.zoom_combo.setCurrentText(f"{pct}%")
+        self.zoom_combo.lineEdit().blockSignals(False)
+        self.zoom_combo.blockSignals(False)
 
     # -- editing -----------------------------------------------------------
 
@@ -741,45 +873,49 @@ class MainWindow(QMainWindow):
         mode = "scaled content" if scale else "kept content"
         self.status(f"Resized {scope} to {width/ps.MM:.0f}×{height/ps.MM:.0f} mm ({mode}).")
 
-    def _on_ocr_region(self, rect_pts: tuple):
-        if not ocr_mod.tesseract_available():
-            from .preflight import tesseract_install_hint
-            QMessageBox.warning(
-                self, "OCR unavailable",
-                "Tesseract OCR isn't installed, so non-editable text can't be read.\n\n"
-                f"Install Tesseract, then retry:\n{tesseract_install_hint()}")
+    def _on_textbox_commit(self, rect_pts, text, size):
+        """A live text box was typed on the canvas — place it as a wrapping text box."""
+        if not text.strip():
             return
+        self._snapshot()
+        req = fm.parse_pdf_fontname("Helvetica")
+        result = self.editor.add_text_box(self.current_page, rect_pts, text, req, size=size)
+        self.status(result.message)
+        self.render_current_page()
+        self._refresh_thumbnail(self.current_page)
+        self._update_title()
+
+    def _on_ocr_region(self, rect_pts: tuple):
         self.status("Running OCR…")
         QApplication.processEvents()
         try:
-            spans = ocr_mod.ocr_line_spans(self.document, self.current_page, rect_pts)
+            words, engine = ocr_mod.recognize_region(self.document, self.current_page, rect_pts)
         except Exception as e:
-            QMessageBox.critical(self, "OCR failed", str(e))
+            from .preflight import tesseract_install_hint
+            QMessageBox.warning(
+                self, "OCR unavailable",
+                f"Couldn't read this region.\n\n{e}\n\n"
+                f"Cloud OCR needs internet; the offline engine (Tesseract) can be installed from:\n"
+                f"{tesseract_install_hint()}")
             return
-        if not spans:
+        if not words:
             self.status("OCR found no text in that region.")
             return
-        recognized = " ".join(s.text for s in spans)
-        sizes = sorted(s.size for s in spans)
-        median_size = sizes[len(sizes) // 2]
+        recognized = " ".join(w.text for w in words)
+        sizes = sorted(w.est_size for w in words)
+        median_size = sizes[len(sizes) // 2] if sizes else 12.0
 
         dlg = OcrReviewDialog(recognized, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         corrected = dlg.text().strip()
 
-        # Build a synthetic span covering the whole region and replace it in place.
-        x0, y0, x1, y1 = rect_pts
-        baseline_y = y1 - (y1 - y0) * 0.18
-        region_span = TextSpan(
-            page_index=self.current_page, block=-1, line=-1, span=-1,
-            text=recognized, bbox=rect_pts, origin=(x0, baseline_y),
-            font_name="Helvetica", size=median_size, color=0, flags=0, font_xref=0,
-        )
-        res = self.editor.resolve_font(region_span)
+        # Remove the original scanned text + reconstruct the background, then place the
+        # corrected text in the same spot.
         self._snapshot()
-        result = self.editor.replace_span_text(region_span, corrected, res)
-        self.status("Replaced OCR'd text in place. " + result.message)
+        result = self.editor.replace_region_inpaint(
+            self.current_page, rect_pts, corrected, size=median_size, color=(0, 0, 0))
+        self.status(f"OCR via {engine}. {result.message}")
         self.render_current_page()
         self._refresh_thumbnail(self.current_page)
         self._update_title()
@@ -1191,6 +1327,37 @@ class MainWindow(QMainWindow):
             self.render_current_page()
         self.status(f"Paragraph detection {'on' if on else 'off'} — "
                     f"{'paragraphs edit as a block' if on else 'every click edits a single line'}.")
+
+    def _toggle_table_detection(self, on: bool):
+        self._table_detect = on
+        if self.tab() is not None:
+            self.render_current_page()
+        self.status("Table detection " + ("on — detected tables are outlined." if on else "off."))
+
+    def _editing_actions(self):
+        return [
+            self.act_mode_add, self.act_mode_box, self.act_mode_ocr, self.act_crop,
+            self.act_page_size, self.act_undo, self.act_redo,
+            self.act_insert_image, self.act_insert_pdf, self.act_insert_blank, self.act_duplicate_page,
+            self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike, self.act_mk_note,
+            self.act_mk_rect, self.act_mk_line, self.act_mk_ink, self.act_redact,
+        ]
+
+    def _toggle_edit_mode(self, on: bool):
+        self._view_only = not on
+        self.act_edit_mode.setText("Edit Mode" if on else "View Only")
+        self.mode_status.setText("Edit Mode" if on else "View Only")
+        for a in self._editing_actions():
+            a.setEnabled(on and self.document.is_open)
+        if on:
+            self._update_undo_actions()
+        if self.tab() is not None:
+            if on:
+                self.set_mode(Mode.SELECT)
+            else:
+                self.view.set_mode(Mode.VIEW)
+        self.status("Edit mode — full editing enabled." if on
+                    else "View Only — read-only; toggle Edit Mode to make changes.")
 
     # -- help / about ------------------------------------------------------
 

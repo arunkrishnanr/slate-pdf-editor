@@ -297,6 +297,89 @@ class TextEditor:
                     total += n
         return total
 
+    def replace_region_inpaint(
+        self,
+        page_index: int,
+        rect_pts: tuple,
+        new_text: str,
+        size: float,
+        color: tuple = (0, 0, 0),
+        align: int = 0,
+    ) -> EditResult:
+        """Remove scanned text from a region and rebuild the background, then place new text.
+
+        Uses OpenCV inpainting: the original glyph pixels are masked out and the background
+        (including textures/patterns) is reconstructed, so it looks like the original text
+        was never there. Falls back to a solid-colour fill if OpenCV isn't available.
+        """
+        page = self.doc.doc[page_index]
+        rect = fitz.Rect(rect_pts)
+        try:
+            import cv2
+            import numpy as np
+        except Exception:
+            return self._replace_region_flat(page, rect, new_text, size, color, align)
+
+        DPI = 200
+        zoom = DPI / 72.0
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=rect, alpha=False)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 4:
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+        elif pix.n == 1:
+            bgr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+        else:
+            bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        # Text tends to be darker than its local background; adaptive threshold isolates it.
+        th = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY_INV, 31, 15)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        mask = cv2.dilate(th, kernel, iterations=2)
+        inpainted = cv2.inpaint(bgr, mask, 3, cv2.INPAINT_TELEA)
+        ok, buf = cv2.imencode(".png", inpainted)
+        if not ok:
+            return self._replace_region_flat(page, rect, new_text, size, color, align)
+
+        # Cover the original with the cleaned background, then lay down the new editable text.
+        page.insert_image(rect, stream=buf.tobytes())
+        self._insert_textbox_fitted(page, rect, new_text, size, color, align,
+                                    fm.parse_pdf_fontname("Helvetica"))
+        self.doc.dirty = True
+        return EditResult(ok=True, message="Scanned text removed (background reconstructed) and replaced.")
+
+    def _replace_region_flat(self, page, rect, new_text, size, color, align):
+        """Fallback when OpenCV is unavailable: sample background, fill, reinsert."""
+        bg = _sample_background(page, rect)
+        page.add_redact_annot(rect, fill=bg)
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        self._insert_textbox_fitted(page, rect, new_text, size, color, align,
+                                    fm.parse_pdf_fontname("Helvetica"))
+        self.doc.dirty = True
+        return EditResult(ok=True, message="Replaced (solid background fill).")
+
+    def _insert_textbox_fitted(self, page, rect, text, size, color, align, req):
+        resolution = fm.resolve(req)
+        font_file = resolution.file_for_embedding
+        cur = size
+        for _ in range(24):
+            try:
+                if font_file:
+                    rc = page.insert_textbox(rect, text, fontfile=font_file,
+                                             fontname=_fontname_for_file(font_file),
+                                             fontsize=cur, color=color, align=align)
+                else:
+                    rc = page.insert_textbox(rect, text, fontname=_builtin_for(req),
+                                             fontsize=cur, color=color, align=align)
+            except Exception:
+                rc = -1
+            if rc >= 0:
+                return
+            cur = round(cur * 0.94, 2)
+            if cur < 4:
+                return
+
     def add_text_box(
         self,
         page_index: int,
