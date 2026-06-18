@@ -11,7 +11,7 @@ from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QDockWidget, QToolBar, QLabel,
     QStatusBar, QApplication, QComboBox, QWidget, QSizePolicy, QDialog,
-    QInputDialog, QLineEdit,
+    QInputDialog, QLineEdit, QTabWidget, QVBoxLayout,
 )
 
 from . import __app_name__, __version__
@@ -32,6 +32,51 @@ from .dialogs import (
 DEVELOPER = "Aaron Krrish"
 
 
+class DocumentTab(QWidget):
+    """One open PDF: owns its document, editor, page view, and per-document state.
+
+    The main window keeps the toolbar/menus/docks global and proxies its handlers to
+    whichever tab is current, so each PDF carries its own undo history, zoom, page, etc.
+    """
+
+    def __init__(self, main: "MainWindow"):
+        super().__init__()
+        self.document = PdfDocument()
+        self.editor = TextEditor(self.document)
+        self.view = PageView()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.view)
+
+        # Per-document state
+        self.current_page = 0
+        self.zoom = 1.5
+        self.blocks: list = []
+        self.sel_span = None
+        self.sel_block = None
+        self.undo_stack: list[bytes] = []
+        self.redo_stack: list[bytes] = []
+        self.find_hits: list = []
+        self.find_idx = -1
+        self.find_query = ""
+        self.pending_image = None
+
+        # Route this view's interactions to the main window's handlers.
+        v = self.view
+        v.commitEdit.connect(main._on_commit_edit)
+        v.commitBlockEdit.connect(main._on_commit_block_edit)
+        v.selected.connect(main._on_selection)
+        v.spanActivated.connect(main._on_span_activated)
+        v.addTextRequested.connect(main._on_add_text)
+        v.textBoxRequested.connect(main._on_text_box)
+        v.ocrRegionRequested.connect(main._on_ocr_region)
+        v.rectToolFinished.connect(main._on_rect_tool)
+        v.pointToolClicked.connect(main._on_point_tool)
+        v.inkFinished.connect(main._on_ink)
+        v.zoomRequested.connect(main._on_zoom_factor)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, icon: Optional[QIcon] = None):
         super().__init__()
@@ -40,37 +85,20 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(icon)
         self.resize(1280, 860)
 
-        self.document = PdfDocument()
-        self.editor = TextEditor(self.document)
-        self.current_page = 0
-        self.zoom = 1.5
-        self._blocks: list = []
-        self._sel_span: TextSpan | None = None
-        self._sel_block = None
-        self._para_detect = True
-        self._undo_stack: list[bytes] = []
-        self._redo_stack: list[bytes] = []
+        self._para_detect = True       # global toggle, applies to all tabs
         self._UNDO_CAP = 25
         self._find_dialog: FindReplaceDialog | None = None
-        self._find_hits: list = []
-        self._find_idx = -1
-        self._find_query = ""
+        self._null_doc = PdfDocument()  # stand-in when no tab is open
 
-        # Central page view
-        self.view = PageView()
-        self.setCentralWidget(self.view)
-        self.view.commitEdit.connect(self._on_commit_edit)
-        self.view.commitBlockEdit.connect(self._on_commit_block_edit)
-        self.view.selected.connect(self._on_selection)
-        self.view.spanActivated.connect(self._on_span_activated)
-        self.view.addTextRequested.connect(self._on_add_text)
-        self.view.textBoxRequested.connect(self._on_text_box)
-        self.view.ocrRegionRequested.connect(self._on_ocr_region)
-        self.view.rectToolFinished.connect(self._on_rect_tool)
-        self.view.pointToolClicked.connect(self._on_point_tool)
-        self.view.inkFinished.connect(self._on_ink)
-        self.view.zoomRequested.connect(self._on_zoom_factor)
-        self._pending_image: str | None = None
+        # Central: one tab per open PDF
+        self.tabs = QTabWidget()
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.setDocumentMode(True)
+        self.tabs.setElideMode(Qt.ElideRight)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self.tabs.tabCloseRequested.connect(self._on_tab_close)
+        self.setCentralWidget(self.tabs)
 
         # Pages dock
         self.pages = PagesPanel()
@@ -104,6 +132,108 @@ class MainWindow(QMainWindow):
 
         # Point pytesseract at a bundled binary if present.
         self._configure_ocr()
+
+    # -- tab proxying ------------------------------------------------------
+    # Handlers were written against self.document / self.view / self.current_page etc.
+    # These properties forward to whichever tab is current, so each PDF keeps its own
+    # document, view, undo history and view state.
+
+    def tab(self) -> Optional[DocumentTab]:
+        w = self.tabs.currentWidget()
+        return w if isinstance(w, DocumentTab) else None
+
+    @property
+    def document(self) -> PdfDocument:
+        t = self.tab()
+        return t.document if t else self._null_doc
+
+    @property
+    def editor(self) -> TextEditor:
+        t = self.tab()
+        return t.editor if t else TextEditor(self._null_doc)
+
+    @property
+    def view(self) -> PageView:
+        return self.tab().view  # only called when a tab exists
+
+    def _tab_attr(self, name, default=None):
+        t = self.tab()
+        return getattr(t, name) if t else default
+
+    def _set_tab_attr(self, name, value):
+        t = self.tab()
+        if t:
+            setattr(t, name, value)
+
+    # current_page / zoom / blocks / selection / find / image / undo proxies
+    current_page = property(lambda s: s._tab_attr("current_page", 0),
+                            lambda s, v: s._set_tab_attr("current_page", v))
+    zoom = property(lambda s: s._tab_attr("zoom", 1.5),
+                    lambda s, v: s._set_tab_attr("zoom", v))
+    _blocks = property(lambda s: s._tab_attr("blocks", []),
+                       lambda s, v: s._set_tab_attr("blocks", v))
+    _sel_span = property(lambda s: s._tab_attr("sel_span"),
+                         lambda s, v: s._set_tab_attr("sel_span", v))
+    _sel_block = property(lambda s: s._tab_attr("sel_block"),
+                          lambda s, v: s._set_tab_attr("sel_block", v))
+    _undo_stack = property(lambda s: s._tab_attr("undo_stack", []))
+    _redo_stack = property(lambda s: s._tab_attr("redo_stack", []))
+    _find_hits = property(lambda s: s._tab_attr("find_hits", []),
+                          lambda s, v: s._set_tab_attr("find_hits", v))
+    _find_idx = property(lambda s: s._tab_attr("find_idx", -1),
+                         lambda s, v: s._set_tab_attr("find_idx", v))
+    _find_query = property(lambda s: s._tab_attr("find_query", ""),
+                           lambda s, v: s._set_tab_attr("find_query", v))
+    _pending_image = property(lambda s: s._tab_attr("pending_image"),
+                              lambda s, v: s._set_tab_attr("pending_image", v))
+
+    # -- tab management ----------------------------------------------------
+
+    def _new_tab(self) -> DocumentTab:
+        t = DocumentTab(self)
+        t.view.set_paragraph_detection(self._para_detect)
+        idx = self.tabs.addTab(t, "Untitled")
+        self.tabs.setCurrentIndex(idx)
+        return t
+
+    def _tab_title(self, t: DocumentTab) -> str:
+        name = os.path.basename(t.document.path) if t.document.path else "Untitled"
+        return ("• " if t.document.dirty else "") + name
+
+    def _refresh_tab_title(self):
+        t = self.tab()
+        if t:
+            self.tabs.setTabText(self.tabs.currentIndex(), self._tab_title(t))
+
+    def _on_tab_changed(self, index: int):
+        if self.tab() is None:
+            self._set_open_state(False)
+            self.props.show_selection(None)
+            self.page_label.setText("  —  ")
+            self.setWindowTitle(__app_name__)
+            return
+        self._set_open_state(True)
+        self.pages.refresh(self.document, self.current_page)
+        self.render_current_page()
+        self._update_undo_actions()
+        self._update_title()
+
+    def _on_tab_close(self, index: int):
+        t = self.tabs.widget(index)
+        if isinstance(t, DocumentTab) and t.document.is_open and t.document.dirty:
+            self.tabs.setCurrentIndex(index)
+            r = QMessageBox.question(
+                self, "Unsaved changes",
+                f"Save changes to {self._tab_title(t).lstrip('• ')} before closing?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+            if r == QMessageBox.Cancel:
+                return
+            if r == QMessageBox.Save:
+                self.save_file()
+        if isinstance(t, DocumentTab):
+            t.document.close()
+        self.tabs.removeTab(index)
+        t.deleteLater()
 
     # -- UI construction ---------------------------------------------------
 
@@ -198,6 +328,8 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.act_zoom_out)
         tb.addAction(self.act_zoom_in)
+        tb.addSeparator()
+        tb.addAction(self.act_para_detect)  # checkable toggle button (orange when on)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -303,6 +435,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(msg, timeout)
 
     def set_mode(self, mode: Mode):
+        if self.tab() is None:
+            return
         self.view.set_mode(mode)
         mode_actions = {
             Mode.SELECT: self.act_mode_select, Mode.ADD_TEXT: self.act_mode_add,
@@ -336,34 +470,45 @@ class MainWindow(QMainWindow):
     # -- file ops ----------------------------------------------------------
 
     def new_file(self):
-        if not self._confirm_discard():
-            return
+        self._new_tab()
         self.document.new_blank()
         self.current_page = 0
-        self._reset_history()
         self._after_document_changed()
         self.status("New blank document.")
 
     def open_file(self):
-        if not self._confirm_discard():
-            return
-        path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF files (*.pdf)")
-        if not path:
-            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "Open PDF(s)", "", "PDF files (*.pdf)")
+        for path in paths:
+            self.open_path(path)
+
+    def open_path(self, path: str):
+        """Open one PDF in a new tab (skips if already open: focuses that tab)."""
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, DocumentTab) and w.document.path == path:
+                self.tabs.setCurrentIndex(i)
+                return
+        t = self._new_tab()
         try:
-            self.document.open(path)
+            t.document.open(path)
         except Exception as e:
+            self._discard_tab(t)
             QMessageBox.critical(self, "Could not open", str(e))
             return
-        if self.document.needs_password and not self._prompt_password():
-            self.document.close()
+        if t.document.needs_password and not self._prompt_password():
+            self._discard_tab(t)
             self.status("Open cancelled — password required.")
-            self._after_document_changed()
             return
         self.current_page = 0
-        self._reset_history()
         self._after_document_changed()
         self.status(f"Opened {os.path.basename(path)} — {self.document.page_count} pages")
+
+    def _discard_tab(self, t: DocumentTab):
+        idx = self.tabs.indexOf(t)
+        if idx >= 0:
+            self.tabs.removeTab(idx)
+        t.document.close()
+        t.deleteLater()
 
     def save_file(self):
         if not self.document.is_open:
@@ -404,14 +549,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export failed", str(e))
 
     # -- rendering ---------------------------------------------------------
-
-    def _reset_history(self):
-        self._undo_stack.clear()
-        self._redo_stack.clear()
-        self._find_query = ""
-        self._find_hits = []
-        self._find_idx = -1
-        self._update_undo_actions()
 
     def _after_document_changed(self):
         self._set_open_state(self.document.is_open)
@@ -606,8 +743,11 @@ class MainWindow(QMainWindow):
 
     def _on_ocr_region(self, rect_pts: tuple):
         if not ocr_mod.tesseract_available():
-            QMessageBox.warning(self, "OCR unavailable",
-                                "Tesseract OCR isn't available. Install it to edit non-editable text.")
+            from .preflight import tesseract_install_hint
+            QMessageBox.warning(
+                self, "OCR unavailable",
+                "Tesseract OCR isn't installed, so non-editable text can't be read.\n\n"
+                f"Install Tesseract, then retry:\n{tesseract_install_hint()}")
             return
         self.status("Running OCR…")
         QApplication.processEvents()
@@ -699,27 +839,31 @@ class MainWindow(QMainWindow):
     # -- misc --------------------------------------------------------------
 
     def _update_title(self):
-        name = os.path.basename(self.document.path) if self.document.path else "Untitled"
-        dirty = "•" if self.document.dirty else ""
+        t = self.tab()
+        if t is None:
+            self.setWindowTitle(__app_name__)
+            return
+        name = os.path.basename(t.document.path) if t.document.path else "Untitled"
+        dirty = "•" if t.document.dirty else ""
         self.setWindowTitle(f"{dirty}{name} — {__app_name__}")
-
-    def _confirm_discard(self) -> bool:
-        if self.document.is_open and self.document.dirty:
-            r = QMessageBox.question(
-                self, "Unsaved changes",
-                "You have unsaved changes. Save before continuing?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
-            if r == QMessageBox.Cancel:
-                return False
-            if r == QMessageBox.Save:
-                self.save_file()
-        return True
+        self._refresh_tab_title()
 
     def closeEvent(self, event):
-        if self._confirm_discard():
-            event.accept()
-        else:
-            event.ignore()
+        """On quit, offer to save every tab with unsaved changes."""
+        for i in range(self.tabs.count()):
+            t = self.tabs.widget(i)
+            if isinstance(t, DocumentTab) and t.document.is_open and t.document.dirty:
+                self.tabs.setCurrentIndex(i)
+                r = QMessageBox.question(
+                    self, "Unsaved changes",
+                    f"Save changes to {self._tab_title(t).lstrip('• ')} before quitting?",
+                    QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+                if r == QMessageBox.Cancel:
+                    event.ignore()
+                    return
+                if r == QMessageBox.Save:
+                    self.save_file()
+        event.accept()
 
     # -- printing ----------------------------------------------------------
 
@@ -1039,8 +1183,12 @@ class MainWindow(QMainWindow):
 
     def _toggle_paragraph_detection(self, on: bool):
         self._para_detect = on
-        self.view.set_paragraph_detection(on)
-        self.render_current_page()
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, DocumentTab):
+                w.view.set_paragraph_detection(on)
+        if self.tab() is not None:
+            self.render_current_page()
         self.status(f"Paragraph detection {'on' if on else 'off'} — "
                     f"{'paragraphs edit as a block' if on else 'every click edits a single line'}.")
 

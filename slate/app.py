@@ -13,31 +13,54 @@ from . import __app_name__
 from .main_window import MainWindow
 
 
+# Theme: dark grey #282828 + orange #ff8431.
 DARK_QSS = """
-QMainWindow, QWidget { background: #2b2e35; color: #e6e8ec; }
-QToolBar { background: #23262c; border: none; padding: 4px; spacing: 2px; }
-QToolBar QToolButton { padding: 5px 9px; border-radius: 6px; color: #e6e8ec; }
-QToolBar QToolButton:hover { background: #353a43; }
-QToolBar QToolButton:checked { background: #2a82e6; color: white; }
-QToolBar QToolButton:disabled { color: #6b7178; }
-QMenuBar { background: #23262c; color: #e6e8ec; }
-QMenuBar::item:selected { background: #353a43; }
-QMenu { background: #2b2e35; color: #e6e8ec; border: 1px solid #3a3f48; }
-QMenu::item:selected { background: #2a82e6; }
-QStatusBar { background: #23262c; color: #cfd3da; }
-QDockWidget { titlebar-close-icon: none; color: #e6e8ec; }
-QDockWidget::title { background: #23262c; padding: 6px; }
-QPushButton { background: #353a43; border: 1px solid #444a54; border-radius: 6px; padding: 6px 12px; }
-QPushButton:hover { background: #3f4651; }
-QPushButton:pressed { background: #2a82e6; }
-QListWidget { background: #21242a; border: none; }
-QListWidget::item { color: #cfd3da; border-radius: 6px; }
-QListWidget::item:selected { background: #2a82e6; color: white; }
+QMainWindow, QWidget { background: #282828; color: #ededed; }
+QToolBar { background: #1f1f1f; border: none; padding: 4px; spacing: 2px; }
+QToolBar QToolButton { padding: 5px 9px; border-radius: 6px; color: #ededed; }
+QToolBar QToolButton:hover { background: #3a3a3a; }
+QToolBar QToolButton:checked { background: #ff8431; color: #282828; }
+QToolBar QToolButton:disabled { color: #6f6f6f; }
+QToolBar::separator { background: #3a3a3a; width: 1px; margin: 4px 4px; }
+QMenuBar { background: #1f1f1f; color: #ededed; }
+QMenuBar::item:selected { background: #3a3a3a; }
+QMenu { background: #2e2e2e; color: #ededed; border: 1px solid #3a3a3a; }
+QMenu::item:selected { background: #ff8431; color: #282828; }
+QStatusBar { background: #1f1f1f; color: #d0d0d0; }
+QStatusBar QLabel { color: #ff8431; }
+QDockWidget { titlebar-close-icon: none; color: #ededed; }
+QDockWidget::title { background: #1f1f1f; padding: 6px; }
+QPushButton { background: #3a3a3a; border: 1px solid #4a4a4a; border-radius: 6px; padding: 6px 12px; color: #ededed; }
+QPushButton:hover { background: #474747; border-color: #ff8431; }
+QPushButton:pressed { background: #ff8431; color: #282828; }
+QPushButton:default { border: 1px solid #ff8431; }
+QListWidget { background: #222222; border: none; }
+QListWidget::item { color: #d0d0d0; border-radius: 6px; }
+QListWidget::item:selected { background: #ff8431; color: #282828; }
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {
-    background: #20232a; border: 1px solid #444a54; border-radius: 5px; padding: 4px;
-    color: #e6e8ec;
+    background: #1d1d1d; border: 1px solid #4a4a4a; border-radius: 5px; padding: 4px;
+    color: #ededed; selection-background-color: #ff8431; selection-color: #282828;
 }
-QLabel { color: #e6e8ec; }
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus { border-color: #ff8431; }
+QTabBar::tab {
+    background: #1f1f1f; color: #c8c8c8; padding: 7px 16px; margin-right: 2px;
+    border-top-left-radius: 6px; border-top-right-radius: 6px;
+}
+QTabBar::tab:selected { background: #282828; color: #ff8431; border-bottom: 2px solid #ff8431; }
+QTabBar::tab:hover { background: #2e2e2e; }
+QTabBar::close-button { subcontrol-position: right; }
+QTabWidget::pane { border: none; }
+QRadioButton, QCheckBox { color: #ededed; }
+QCheckBox::indicator:checked, QRadioButton::indicator:checked { background: #ff8431; border: 1px solid #ff8431; }
+QToolButton:checked { background: #ff8431; color: #282828; border-radius: 6px; }
+QScrollBar:vertical { background: #1f1f1f; width: 12px; }
+QScrollBar::handle:vertical { background: #4a4a4a; border-radius: 6px; min-height: 24px; }
+QScrollBar::handle:vertical:hover { background: #ff8431; }
+QScrollBar:horizontal { background: #1f1f1f; height: 12px; }
+QScrollBar::handle:horizontal { background: #4a4a4a; border-radius: 6px; min-width: 24px; }
+QScrollBar::handle:horizontal:hover { background: #ff8431; }
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QLabel { color: #ededed; }
 """
 
 
@@ -64,14 +87,13 @@ def main():
     win = MainWindow(icon=icon if not icon.isNull() else None)
     win.show()
 
-    # Open a file passed on the command line.
-    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        try:
-            win.document.open(sys.argv[1])
-            win.current_page = 0
-            win._after_document_changed()
-        except Exception:
-            pass
+    # Open any PDFs passed on the command line, each in its own tab.
+    for arg in sys.argv[1:]:
+        if os.path.isfile(arg) and arg.lower().endswith(".pdf"):
+            try:
+                win.open_path(arg)
+            except Exception:
+                pass
 
     sys.exit(app.exec())
 

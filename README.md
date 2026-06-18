@@ -25,6 +25,8 @@ This is the same mechanism real editors use: the actual content of the PDF chang
 
 ## Features
 
+- **Multiple PDFs in tabs** — open many files at once; each tab keeps its own pages, zoom,
+  undo history and edits. Drag-reorder or close tabs; re-opening a file focuses its tab.
 - **Edit text** — click any line; an edit box appears right over it. Enter commits, Esc cancels.
 - **Structure recognition** — Slate classifies each text block as **Title / Heading /
   Paragraph / Line**. Click a paragraph and the *whole* paragraph opens for editing and
@@ -69,6 +71,11 @@ pip install -r requirements.txt
 python tools/make_icon.py            # generate the app icon
 python run.py [optional.pdf]
 ```
+
+On launch Slate runs a **dependency preflight**: if an essential runtime tool (correct
+Python, PySide6, PyMuPDF, Pillow) is missing it shows an error with the official download
+link and exits. Tesseract (OCR) is optional — the app runs without it and points you to the
+download when you use OCR.
 
 OCR needs the Tesseract engine on your PATH:
 - macOS: `brew install tesseract`
