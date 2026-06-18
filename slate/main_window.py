@@ -6,10 +6,11 @@ import os
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QAction, QKeySequence, QIcon
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QImage, QPainter
+from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QDockWidget, QToolBar, QLabel,
-    QStatusBar, QApplication, QComboBox, QWidget, QSizePolicy,
+    QStatusBar, QApplication, QComboBox, QWidget, QSizePolicy, QDialog,
 )
 
 from . import __app_name__, __version__
@@ -22,7 +23,11 @@ from .text_editor import TextEditor, EditResult
 from .canvas import PageView, Mode
 from .pages_panel import PagesPanel
 from .properties_panel import PropertiesPanel, Selection
-from .dialogs import FontPromptDialog, AddTextDialog, OcrReviewDialog, PageSizeDialog
+from .dialogs import (
+    FontPromptDialog, AddTextDialog, OcrReviewDialog, PageSizeDialog, HelpDialog,
+)
+
+DEVELOPER = "Aaron Krrish"
 
 
 class MainWindow(QMainWindow):
@@ -94,6 +99,8 @@ class MainWindow(QMainWindow):
         self.act_save = QAction("Save", self, shortcut=QKeySequence.Save, triggered=self.save_file)
         self.act_save_as = QAction("Save As…", self, shortcut=QKeySequence.SaveAs, triggered=self.save_file_as)
         self.act_export = QAction("Export Copy…", self, triggered=self.export_copy)
+        self.act_print = QAction("Print…", self, shortcut=QKeySequence.Print, triggered=self.print_document)
+        self.act_print_preview = QAction("Print Preview…", self, triggered=self.print_preview)
         self.act_quit = QAction("Quit", self, shortcut=QKeySequence.Quit, triggered=self.close)
 
         self.act_mode_select = QAction("Edit Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
@@ -109,7 +116,14 @@ class MainWindow(QMainWindow):
         self.act_zoom_in = QAction("Zoom +", self, shortcut=QKeySequence.ZoomIn, triggered=lambda: self._on_zoom_factor(1.15))
         self.act_zoom_out = QAction("Zoom −", self, shortcut=QKeySequence.ZoomOut, triggered=lambda: self._on_zoom_factor(1/1.15))
 
-        self.act_about = QAction("About", self, triggered=self.about)
+        self.act_user_guide = QAction("User Guide", self, shortcut=QKeySequence.HelpContents,
+                                      triggered=self.show_help)
+        self.act_user_guide.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+        self.act_about = QAction("About Slate PDF Editor", self, triggered=self.about)
+        self.act_about.setMenuRole(QAction.MenuRole.AboutRole)  # -> app menu on macOS
+        self.act_about_dev = QAction("About the Developer", self, triggered=self.about_developer)
+        # Keep the developer credit in the Help menu (don't let macOS merge it with About).
+        self.act_about_dev.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
 
     def _build_toolbar(self):
         tb = QToolBar("Main")
@@ -147,6 +161,9 @@ class MainWindow(QMainWindow):
         for a in (self.act_new, self.act_open, self.act_save, self.act_save_as, self.act_export):
             m_file.addAction(a)
         m_file.addSeparator()
+        m_file.addAction(self.act_print)
+        m_file.addAction(self.act_print_preview)
+        m_file.addSeparator()
         m_file.addAction(self.act_quit)
 
         m_tools = bar.addMenu("Tools")
@@ -163,7 +180,10 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.props_dock.toggleViewAction())
 
         m_help = bar.addMenu("Help")
+        m_help.addAction(self.act_user_guide)
+        m_help.addSeparator()
         m_help.addAction(self.act_about)
+        m_help.addAction(self.act_about_dev)
 
     def _configure_ocr(self):
         # Prefer a tesseract bundled under vendor/ (works inside a frozen one-file exe,
@@ -185,6 +205,7 @@ class MainWindow(QMainWindow):
 
     def _set_open_state(self, is_open: bool):
         for a in (self.act_save, self.act_save_as, self.act_export,
+                  self.act_print, self.act_print_preview,
                   self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr,
                   self.act_page_size,
                   self.act_prev, self.act_next, self.act_zoom_in, self.act_zoom_out):
@@ -567,10 +588,74 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
 
+    # -- printing ----------------------------------------------------------
+
+    def print_document(self):
+        if not self.document.is_open:
+            return
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setDocName(os.path.basename(self.document.path or "document.pdf"))
+        printer.setFromTo(1, self.document.page_count)
+        dlg = QPrintDialog(printer, self)
+        dlg.setWindowTitle("Print")
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.status("Printing…")
+        QApplication.processEvents()
+        self._render_to_printer(printer)
+        self.status("Sent to printer.")
+
+    def print_preview(self):
+        if not self.document.is_open:
+            return
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setDocName(os.path.basename(self.document.path or "document.pdf"))
+        dlg = QPrintPreviewDialog(printer, self)
+        dlg.paintRequested.connect(self._render_to_printer)
+        dlg.exec()
+
+    def _render_to_printer(self, printer: QPrinter):
+        """Paint each page onto the printer, scaled to the sheet and centred."""
+        painter = QPainter(printer)
+        try:
+            first = max(1, printer.fromPage() or 1)
+            last = printer.toPage() or self.document.page_count
+            last = min(last, self.document.page_count)
+            # Render around 150 dpi for crisp output without huge memory use.
+            dpi = min(printer.resolution(), 150)
+            zoom = dpi / 72.0
+            for n, i in enumerate(range(first - 1, last)):
+                if n > 0:
+                    printer.newPage()
+                img = QImage.fromData(self.document.render_page_png(i, zoom), "PNG")
+                page_rect = painter.viewport()
+                size = img.size()
+                size.scale(page_rect.size(), Qt.KeepAspectRatio)
+                x = page_rect.x() + (page_rect.width() - size.width()) // 2
+                y = page_rect.y() + (page_rect.height() - size.height()) // 2
+                painter.setViewport(x, y, size.width(), size.height())
+                painter.setWindow(img.rect())
+                painter.drawImage(0, 0, img)
+        finally:
+            painter.end()
+
+    # -- help / about ------------------------------------------------------
+
+    def show_help(self):
+        HelpDialog(self).exec()
+
     def about(self):
         QMessageBox.about(
             self, "About " + __app_name__,
             f"<h3>{__app_name__} {__version__}</h3>"
-            "<p>A desktop PDF editor with true in-place text editing, font detection, "
-            "page organization, and OCR for scanned text.</p>"
-            "<p>Built with PySide6 and PyMuPDF.</p>")
+            "<p>A desktop PDF editor with true in-place text editing, structure recognition, "
+            "font detection &amp; selection, page organization, international page sizes, "
+            "and OCR for scanned text.</p>"
+            "<p>Built with PySide6 and PyMuPDF.</p>"
+            f"<p>Developed by: <b>{DEVELOPER}</b></p>")
+
+    def about_developer(self):
+        QMessageBox.about(
+            self, "About the Developer",
+            f"<h3>Developed by: {DEVELOPER}</h3>"
+            f"<p>{__app_name__} {__version__}</p>")

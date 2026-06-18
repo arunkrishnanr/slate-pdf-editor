@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QDialogButtonBox, QSpinBox, QComboBox, QPlainTextEdit, QFormLayout,
-    QRadioButton, QButtonGroup, QCheckBox,
+    QRadioButton, QButtonGroup, QCheckBox, QTextBrowser,
 )
 
 from . import font_manager as fm
@@ -165,20 +165,30 @@ class PageSizeDialog(QDialog):
         self.setMinimumWidth(420)
         form = QFormLayout(self)
 
-        # Size picker, grouped by standard family.
+        # Two-level picker: Category -> Size (keeps each list short).
+        self.cat_combo = QComboBox()
+        for group_name, _names in ps.PAGE_SIZE_GROUPS:
+            self.cat_combo.addItem(group_name)
+        self.cat_combo.addItem("Custom")
+        self.cat_combo.currentIndexChanged.connect(self._on_category_changed)
+        form.addRow("Category", self.cat_combo)
+
         self.size_combo = QComboBox()
-        for group_name, names in ps.PAGE_SIZE_GROUPS:
-            self.size_combo.addItem(f"— {group_name} —")
-            idx = self.size_combo.count() - 1
-            self.size_combo.model().item(idx).setEnabled(False)
-            for n in names:
-                self.size_combo.addItem(ps.size_label(n), n)
-        self.size_combo.addItem("Custom…", "__custom__")
+        form.addRow("Size", self.size_combo)
+
+        # Preselect the category + size that matches the current page, if known.
+        start_cat = 0
         if current_label:
-            i = self.size_combo.findData(current_label)
-            if i >= 0:
-                self.size_combo.setCurrentIndex(i)
-        form.addRow("Standard", self.size_combo)
+            for gi, (_g, names) in enumerate(ps.PAGE_SIZE_GROUPS):
+                if current_label in names:
+                    start_cat = gi
+                    break
+        self.cat_combo.setCurrentIndex(start_cat)
+        self._on_category_changed(start_cat)
+        if current_label:
+            j = self.size_combo.findData(current_label)
+            if j >= 0:
+                self.size_combo.setCurrentIndex(j)
 
         # Custom dimensions (mm)
         custom_row = QHBoxLayout()
@@ -187,6 +197,7 @@ class PageSizeDialog(QDialog):
         custom_row.addWidget(QLabel("W")); custom_row.addWidget(self.cw)
         custom_row.addWidget(QLabel("H")); custom_row.addWidget(self.ch)
         form.addRow("Custom size", custom_row)
+        self._on_category_changed(self.cat_combo.currentIndex())  # now that cw/ch exist
 
         # Orientation
         orient_row = QHBoxLayout()
@@ -224,16 +235,110 @@ class PageSizeDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
 
+    def _on_category_changed(self, idx: int):
+        is_custom = self.cat_combo.currentText() == "Custom"
+        self.size_combo.blockSignals(True)
+        self.size_combo.clear()
+        if not is_custom and 0 <= idx < len(ps.PAGE_SIZE_GROUPS):
+            for n in ps.PAGE_SIZE_GROUPS[idx][1]:
+                self.size_combo.addItem(ps.size_label(n), n)
+        self.size_combo.blockSignals(False)
+        self.size_combo.setEnabled(not is_custom)
+        if hasattr(self, "cw"):
+            self.cw.setEnabled(is_custom)
+            self.ch.setEnabled(is_custom)
+
     def result_values(self):
         """Return (width_pt, height_pt, apply_all, scale_content)."""
-        data = self.size_combo.currentData()
-        if data == "__custom__" or data is None:
+        if self.cat_combo.currentText() == "Custom":
             w = self.cw.value() * ps.MM
             h = self.ch.value() * ps.MM
         else:
+            data = self.size_combo.currentData()
             w, h = ps.PAGE_SIZES[data]
         if self.landscape.isChecked():
             w, h = max(w, h), min(w, h)
         else:
             w, h = min(w, h), max(w, h)
         return w, h, self.scope_all.isChecked(), self.scale_content.isChecked()
+
+
+HELP_HTML = """
+<h2>Slate PDF Editor — User Guide</h2>
+<p>Slate edits the <b>real content</b> of a PDF (original glyphs are removed and replaced),
+not a layer stamped on top.</p>
+
+<h3>Opening &amp; saving</h3>
+<ul>
+<li><b>File ▸ Open</b> (⌘/Ctrl+O) — open a PDF. <b>Save</b> (⌘/Ctrl+S), <b>Save As</b>,
+or <b>Export Copy</b>.</li>
+<li><b>File ▸ Print</b> (⌘/Ctrl+P) — print, or use <b>Print Preview</b> first.</li>
+</ul>
+
+<h3>Editing text</h3>
+<ul>
+<li><b>Edit Text</b> tool: click a line to edit it inline — press <b>Enter</b> to commit,
+<b>Esc</b> to cancel.</li>
+<li>Click a <b>paragraph</b> and the whole paragraph opens; it re-wraps within its area.
+Press <b>Ctrl/⌘+Enter</b> to commit, <b>Esc</b> to cancel.</li>
+<li>The <b>Properties</b> panel (right) shows the detected structure (Title / Heading /
+Paragraph / Line) and the font. Change <b>font, size, bold/italic, colour, alignment</b>
+and click <b>Apply</b> — to the line or the whole paragraph.</li>
+</ul>
+
+<h3>Fonts</h3>
+<ul>
+<li>Slate detects the font of the text you click. If it isn't installed, you're asked to
+<b>install</b> it (opens Font Book / Windows Fonts) or to use the closest <b>substitute</b>.</li>
+<li>Pick any installed font manually from the Properties panel.</li>
+</ul>
+
+<h3>Adding text</h3>
+<ul>
+<li><b>Add Text</b>: click where you want new text.</li>
+<li><b>Text Box</b>: drag a box, then type wrapping multi-line text.</li>
+</ul>
+
+<h3>Scanned / non-editable text (OCR)</h3>
+<ul>
+<li><b>OCR Region</b>: drag a box over text that isn't selectable. Slate reads it with
+Tesseract, lets you correct it, then removes the original and places your text in the
+same spot.</li>
+</ul>
+
+<h3>Organize pages</h3>
+<ul>
+<li>Left panel: drag thumbnails to reorder; <b>Delete</b>, <b>Rotate</b>,
+<b>Split off</b> selected pages to a new PDF, or split the document in two
+(right-click a thumbnail).</li>
+</ul>
+
+<h3>Page size</h3>
+<ul>
+<li><b>Page ▸ Page Size</b>: choose a <b>Category</b> (ISO A/B/C, JIS B, US, ANSI, ARCH)
+then a <b>Size</b>, or set a custom size. Apply to this page or all pages, portrait or
+landscape. Choose <b>scale-to-fit</b> or <b>keep-canvas</b> — both keep text editable.</li>
+</ul>
+
+<h3>View</h3>
+<ul>
+<li>Zoom with the toolbar or <b>Ctrl/⌘ + mouse wheel</b>. Navigate pages with ◀ ▶.</li>
+</ul>
+"""
+
+
+class HelpDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Slate PDF Editor — Help")
+        self.resize(620, 640)
+        layout = QVBoxLayout(self)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(HELP_HTML)
+        layout.addWidget(browser)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        buttons.button(QDialogButtonBox.Close).clicked.connect(self.accept)
+        layout.addWidget(buttons)

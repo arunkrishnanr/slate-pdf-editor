@@ -60,6 +60,7 @@ class PropertiesPanel(QWidget):
         form.setLabelAlignment(Qt.AlignRight)
 
         self.font_combo = QFontComboBox()
+        self.font_combo.setCurrentFont(QFont("Helvetica"))
         form.addRow("Font", self.font_combo)
 
         self.size_spin = QSpinBox()
