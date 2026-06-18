@@ -26,9 +26,21 @@ This is the same mechanism real editors use: the actual content of the PDF chang
 ## Features
 
 - **Edit text** — click any line; an edit box appears right over it. Enter commits, Esc cancels.
+- **Structure recognition** — Slate classifies each text block as **Title / Heading /
+  Paragraph / Line**. Click a paragraph and the *whole* paragraph opens for editing and
+  **re-wraps within its own region** (growing downward, shrinking to fit if needed); titles
+  and single lines edit individually.
 - **Font detection** — Slate identifies the font behind the text you click. If it isn't
   installed it prompts you to **install** it (opens Font Book / Windows Fonts) and otherwise
   **substitutes** the closest match, telling you which.
+- **Manual font selection** — the **Properties** panel (right) shows the detected style and
+  lets you override **font family, size, bold/italic, colour and alignment**, then Apply —
+  to the clicked text or the whole paragraph.
+- **Text box** — draw a box and type **wrapping** multi-line text.
+- **Page size** — set any page to an international standard (**ISO A0–A10, B0–B10, C0–C10,
+  JIS B, US Letter/Legal/Ledger/Executive, ANSI A–E, ARCH A–E**) or a custom size, portrait
+  or landscape, for the current page or all pages. Choose **scale-to-fit** or
+  **keep-canvas** — both keep the text fully editable afterwards.
 - **Add text** — drop new text anywhere, choosing font and size.
 - **OCR fallback** — for non-editable / scanned pages, drag a box over the text. Slate runs
   **Tesseract**, shows you the recognized text to correct, then removes the original and
@@ -74,13 +86,16 @@ binary and its `tessdata` folder under `vendor/` before building; Slate auto-det
 
 | File | Responsibility |
 |------|----------------|
-| `slate/pdf_document.py` | PyMuPDF wrapper: open/save, render, text extraction, embedded-font extraction, page ops |
-| `slate/text_editor.py` | True in-place edit: redact + reinsert with font matching |
+| `slate/pdf_document.py` | PyMuPDF wrapper: open/save, render, text extraction, embedded-font extraction, page ops, resize |
+| `slate/text_editor.py` | True in-place edit: redact + reinsert; paragraph reflow; text boxes; restyle |
 | `slate/font_manager.py` | Parse PDF font names, index system fonts, detect/match/substitute |
+| `slate/structure.py` | Group spans into blocks; classify Title/Heading/Paragraph/Line |
+| `slate/page_sizes.py` | International page-size standards table (ISO/JIS/US/ANSI/ARCH) |
 | `slate/ocr.py` | Tesseract OCR → positioned spans for the non-editable path |
-| `slate/canvas.py` | Page view, click-to-edit inline editing, OCR region drag |
+| `slate/canvas.py` | Page view, click-to-edit inline + paragraph editing, text-box / OCR drag |
 | `slate/pages_panel.py` | Organize-pages thumbnail panel |
-| `slate/dialogs.py` | Font-install prompt, add-text, OCR review |
+| `slate/properties_panel.py` | Text Properties panel: manual font/size/style/colour/align |
+| `slate/dialogs.py` | Font-install prompt, add-text, OCR review, page-size |
 | `slate/main_window.py` | Wires everything together |
 | `slate/app.py` | QApplication, dark theme, icon |
 | `tools/make_icon.py` | Generates `icon.png/.icns/.ico` |
