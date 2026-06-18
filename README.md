@@ -27,7 +27,12 @@ This is the same mechanism real editors use: the actual content of the PDF chang
 
 - **Multiple PDFs in tabs** — open many files at once; each tab keeps its own pages, zoom,
   undo history and edits. Drag-reorder or close tabs; re-opening a file focuses its tab.
-- **Edit ⇄ View-only** — one toggle swaps between full editing and a read-only viewing mode.
+- **View-only by default** — opens read-only; flip the **Edit Mode** switch to edit. Toolbar
+  switches (Edit Mode, Paragraphs, Tables, Properties) are on/off toggles.
+- **Recognize Text (OCR)** — Adobe-style: adds an invisible, **selectable & searchable** text
+  layer over a scanned page (image appearance unchanged), via cloud AI OCR / offline Tesseract.
+- **Interactive tables** — detect tables, drag row/column dividers, add rows/columns, then
+  apply the gridlines to the page.
 - **Zoom bar** — a bottom slider with − / + on each side, plus **Fit to Window** and
   preset levels (25–200%); type any custom percentage.
 - **Structure overlays** — toggle **Paragraph Detection** and **Table Detection** on/off

@@ -117,9 +117,10 @@ class PageView(QGraphicsView):
         self._ink_points: list = []
         self._ink_items: list = []
 
-        self._notes: list = []     # [(bbox, text)] for hover tooltips
-        self._tables: list = []    # [bbox] detected table boundaries
+        self._notes: list = []          # [(bbox, text)] for hover tooltips
+        self._table_grids: list = []    # [{bbox, cols:[x...], rows:[y...]}] editable grids
         self._table_items: list = []
+        self._dragging_divider = None   # (table_idx, 'col'|'row', divider_idx)
 
         self.setMouseTracking(True)
 
@@ -157,32 +158,109 @@ class PageView(QGraphicsView):
         self._dragging = False
         self._table_items = []
         self._notes = []
-        self._tables = []
+        self._table_grids = []
+        self._dragging_divider = None
         self._pixmap_item = self._scene.addPixmap(pix)
         self._scene.setSceneRect(QRectF(pix.rect()))
 
     def set_zoom(self, zoom: float):
         self._zoom = zoom
 
-    def set_overlays(self, notes: list, tables: list):
-        """Notes -> hover tooltips; tables -> drawn boundary overlays."""
+    def set_overlays(self, notes: list, table_grids: list):
+        """Notes -> hover tooltips; table_grids -> editable grid overlays."""
         self._notes = notes or []
+        self._table_grids = [
+            {"bbox": g["bbox"], "cols": list(g["cols"]), "rows": list(g["rows"])}
+            for g in (table_grids or [])
+        ]
+        self._redraw_tables()
+
+    def _redraw_tables(self):
         for it in self._table_items:
             try:
                 self._scene.removeItem(it)
             except Exception:
                 pass
         self._table_items = []
-        self._tables = tables or []
-        for bbox in self._tables:
-            item = QGraphicsRectItem(self._bbox_scene_rect(bbox))
-            pen = QPen(QColor(0xFF, 0x84, 0x31), 1.6)
-            pen.setStyle(Qt.DashLine)
-            item.setPen(pen)
-            item.setBrush(QBrush(QColor(0xFF, 0x84, 0x31, 22)))
-            item.setZValue(8)
-            self._scene.addItem(item)
-            self._table_items.append(item)
+        for g in self._table_grids:
+            x0, y0, x1, y1 = g["bbox"]
+            # outer boundary
+            outer = QGraphicsRectItem(self._bbox_scene_rect(g["bbox"]))
+            outer.setPen(QPen(QColor(0xFF, 0x84, 0x31), 1.8))
+            outer.setBrush(QBrush(QColor(0xFF, 0x84, 0x31, 18)))
+            outer.setZValue(8)
+            self._scene.addItem(outer)
+            self._table_items.append(outer)
+            z = self._zoom
+            for cx in g["cols"]:
+                line = self._scene.addLine(cx * z, y0 * z, cx * z, y1 * z,
+                                           QPen(QColor(0xFF, 0x84, 0x31), 1.2))
+                line.setZValue(9)
+                self._table_items.append(line)
+            for ry in g["rows"]:
+                line = self._scene.addLine(x0 * z, ry * z, x1 * z, ry * z,
+                                           QPen(QColor(0xFF, 0x84, 0x31), 1.2))
+                line.setZValue(9)
+                self._table_items.append(line)
+
+    def table_grids(self) -> list:
+        return self._table_grids
+
+    def _divider_at(self, scene_pt):
+        """Return (table_idx, 'col'|'row', divider_idx) if near a divider, else None."""
+        x, y = scene_pt.x() / self._zoom, scene_pt.y() / self._zoom
+        tol = 4.0 / max(self._zoom, 0.2)
+        for ti, g in enumerate(self._table_grids):
+            x0, y0, x1, y1 = g["bbox"]
+            if y0 - tol <= y <= y1 + tol:
+                for ci, cx in enumerate(g["cols"]):
+                    if abs(x - cx) <= tol:
+                        return (ti, "col", ci)
+            if x0 - tol <= x <= x1 + tol:
+                for ri, ry in enumerate(g["rows"]):
+                    if abs(y - ry) <= tol:
+                        return (ti, "row", ri)
+        return None
+
+    def add_table_row(self, table_idx: int = 0):
+        """Insert a row divider in the largest vertical gap of a table."""
+        if not self._table_grids:
+            return
+        g = self._table_grids[table_idx]
+        rows = sorted(g["rows"])
+        gaps = [(rows[i + 1] - rows[i], (rows[i] + rows[i + 1]) / 2) for i in range(len(rows) - 1)]
+        if not gaps:
+            return
+        g["rows"].append(max(gaps)[1])
+        g["rows"].sort()
+        self._redraw_tables()
+
+    def add_table_col(self, table_idx: int = 0):
+        if not self._table_grids:
+            return
+        g = self._table_grids[table_idx]
+        cols = sorted(g["cols"])
+        gaps = [(cols[i + 1] - cols[i], (cols[i] + cols[i + 1]) / 2) for i in range(len(cols) - 1)]
+        if not gaps:
+            return
+        g["cols"].append(max(gaps)[1])
+        g["cols"].sort()
+        self._redraw_tables()
+
+    def _drag_divider_to(self, scene_pt):
+        ti, kind, idx = self._dragging_divider
+        g = self._table_grids[ti]
+        x0, y0, x1, y1 = g["bbox"]
+        if kind == "col":
+            nx = min(max(scene_pt.x() / self._zoom, x0), x1)
+            g["cols"][idx] = nx
+            # Outer edges drag the bbox so the grid stays consistent.
+            g["bbox"] = (min(g["cols"]), y0, max(g["cols"]), y1)
+        else:
+            ny = min(max(scene_pt.y() / self._zoom, y0), y1)
+            g["rows"][idx] = ny
+            g["bbox"] = (x0, min(g["rows"]), x1, max(g["rows"]))
+        self._redraw_tables()
 
     def _note_at(self, scene_pt: QPointF):
         x, y = scene_pt.x() / self._zoom, scene_pt.y() / self._zoom
@@ -253,6 +331,17 @@ class PageView(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         scene_pt = self.mapToScene(event.position().toPoint())
+        # Dragging a table divider takes priority over everything else.
+        if self._dragging_divider is not None:
+            self._drag_divider_to(scene_pt)
+            return super().mouseMoveEvent(event)
+        # Cursor feedback when hovering a table divider.
+        if self._table_grids and not self._dragging:
+            d = self._divider_at(scene_pt)
+            if d is not None:
+                self.viewport().setCursor(Qt.SplitHCursor if d[1] == "col" else Qt.SplitVCursor)
+            elif self._mode in (Mode.VIEW, Mode.SELECT):
+                self.viewport().setCursor(Qt.ArrowCursor)
         # Hovering a sticky note shows its text (in any mode).
         note = self._note_at(scene_pt) if self._notes else None
         if note:
@@ -277,6 +366,13 @@ class PageView(QGraphicsView):
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
         scene_pt = self.mapToScene(event.position().toPoint())
+
+        # Table divider drag takes priority when grids are shown.
+        if self._table_grids:
+            d = self._divider_at(scene_pt)
+            if d is not None:
+                self._dragging_divider = d
+                return  # consume; don't start any other interaction
 
         if self._mode == Mode.SELECT:
             span = self._span_at(scene_pt)
@@ -305,6 +401,9 @@ class PageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._dragging_divider is not None:
+            self._dragging_divider = None
+            return super().mouseReleaseEvent(event)
         if self._mode in RUBBER_MODES and self._dragging:
             self._dragging = False
             self._clear_preview()

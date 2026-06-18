@@ -297,6 +297,29 @@ class TextEditor:
                     total += n
         return total
 
+    def recognize_text_searchable(self, page_index: int) -> tuple:
+        """Acrobat-style 'Recognize Text': OCR the page and overlay an INVISIBLE text
+        layer so the scanned content becomes selectable & searchable, while the original
+        image appearance is preserved. Returns (word_count, engine_name)."""
+        from . import ocr as _ocr
+        page = self.doc.doc[page_index]
+        r = page.rect
+        words, engine = _ocr.recognize_region(self.doc, page_index, (r.x0, r.y0, r.x1, r.y1))
+        count = 0
+        for w in words:
+            if not w.text.strip():
+                continue
+            x0, y0, x1, y1 = w.bbox_pts
+            fs = max(4.0, (y1 - y0) * 0.9)
+            try:
+                page.insert_text(fitz.Point(x0, y1 - (y1 - y0) * 0.18), w.text,
+                                 fontsize=fs, render_mode=3)  # render_mode 3 = invisible
+                count += 1
+            except Exception:
+                continue
+        self.doc.dirty = True
+        return count, engine
+
     def replace_region_inpaint(
         self,
         page_index: int,

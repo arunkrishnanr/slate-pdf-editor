@@ -275,9 +275,31 @@ or <b>Export Copy</b>.</li>
 <li><b>File ▸ Print</b> (⌘/Ctrl+P) — print, or use <b>Print Preview</b> first.</li>
 </ul>
 
+<h3>Edit Mode vs View Only</h3>
+<ul>
+<li>Slate opens in <b>View Only</b> (read-only). Flip the <b>Edit Mode</b> switch in the
+toolbar to make changes. Other switches: <b>Paragraphs</b>, <b>Tables</b>, <b>Properties</b>
+(show/hide the panel).</li>
+</ul>
+
+<h3>Recognize Text (OCR) — make a scan searchable</h3>
+<ul>
+<li><b>Tools ▸ Recognize Text</b> reads a scanned page with cloud AI OCR (Tesseract
+offline fallback) and adds an <b>invisible, selectable/searchable</b> text layer over the
+image — the page looks identical but you can now select, copy and search the text
+(Adobe-style "Searchable Image").</li>
+</ul>
+
+<h3>Tables</h3>
+<ul>
+<li>Turn on the <b>Tables</b> switch to detect and outline tables. Drag the row/column
+<b>dividers</b> to resize, use <b>＋ Row</b> / <b>＋ Column</b> to add lines, then
+<b>Apply Table</b> to draw the gridlines onto the page.</li>
+</ul>
+
 <h3>Editing text</h3>
 <ul>
-<li><b>Edit Text</b> tool: click a line to edit it inline — press <b>Enter</b> to commit,
+<li>With <b>Edit Mode</b> on: click a line to edit it inline — press <b>Enter</b> to commit,
 <b>Esc</b> to cancel.</li>
 <li>Click a <b>paragraph</b> and the whole paragraph opens; it re-wraps within its area.
 Press <b>Ctrl/⌘+Enter</b> to commit, <b>Esc</b> to cancel.</li>

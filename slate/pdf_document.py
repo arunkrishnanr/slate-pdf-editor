@@ -374,6 +374,43 @@ class PdfDocument:
             pass
         return out
 
+    def detect_table_grids(self, page_index: int) -> list[dict]:
+        """Return editable grid structures for tables: {bbox, cols:[x...], rows:[y...]}."""
+        out = []
+        try:
+            finder = self.doc[page_index].find_tables()
+            for t in finder.tables:
+                xs, ys = set(), set()
+                for c in t.cells:
+                    if not c:
+                        continue
+                    xs.add(round(c[0], 1)); xs.add(round(c[2], 1))
+                    ys.add(round(c[1], 1)); ys.add(round(c[3], 1))
+                if xs and ys:
+                    cols, rows = sorted(xs), sorted(ys)
+                    out.append({"bbox": (cols[0], rows[0], cols[-1], rows[-1]),
+                                "cols": cols, "rows": rows})
+                else:
+                    bx = tuple(t.bbox)
+                    out.append({"bbox": bx, "cols": [bx[0], bx[2]], "rows": [bx[1], bx[3]]})
+        except Exception:
+            pass
+        return out
+
+    def draw_table_grids(self, page_index: int, grids: list, color=(0, 0, 0), width: float = 0.8):
+        """Draw the (possibly edited) gridlines of tables onto the page."""
+        page = self.doc[page_index]
+        shape = page.new_shape()
+        for g in grids:
+            x0, y0, x1, y1 = g["bbox"]
+            for cx in g["cols"]:
+                shape.draw_line(fitz.Point(cx, y0), fitz.Point(cx, y1))
+            for ry in g["rows"]:
+                shape.draw_line(fitz.Point(x0, ry), fitz.Point(x1, ry))
+        shape.finish(color=color, width=width)
+        shape.commit()
+        self.dirty = True
+
     def note_annotations(self, page_index: int) -> list[tuple]:
         """Return [(bbox, text), ...] for sticky-note annotations on a page."""
         out = []

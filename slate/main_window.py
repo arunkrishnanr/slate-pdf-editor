@@ -24,6 +24,7 @@ from .text_editor import TextEditor, EditResult
 from .canvas import PageView, Mode
 from .pages_panel import PagesPanel
 from .properties_panel import PropertiesPanel, Selection
+from .widgets import SwitchButton
 from .dialogs import (
     FontPromptDialog, AddTextDialog, OcrReviewDialog, PageSizeDialog, HelpDialog,
     FindReplaceDialog,
@@ -86,9 +87,9 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(icon)
         self.resize(1280, 860)
 
-        self._para_detect = True       # global toggle, applies to all tabs
-        self._table_detect = False     # table-boundary overlay toggle
-        self._view_only = False        # edit vs read-only mode
+        self._para_detect = False      # off by default; toggle applies to all tabs
+        self._table_detect = False     # table overlay/editor toggle, off by default
+        self._view_only = True         # app starts read-only; Edit Mode switch turns it on
         self._UNDO_CAP = 25
         self._find_dialog: FindReplaceDialog | None = None
         self._null_doc = PdfDocument()  # stand-in when no tab is open
@@ -263,17 +264,32 @@ class MainWindow(QMainWindow):
         self.act_find = QAction("Find & Replace…", self, shortcut=QKeySequence.Find, triggered=self.show_find)
 
         self.act_para_detect = QAction("Paragraph Detection", self, checkable=True)
-        self.act_para_detect.setChecked(True)
+        self.act_para_detect.setChecked(False)
         self.act_para_detect.toggled.connect(self._toggle_paragraph_detection)
 
         self.act_table_detect = QAction("Table Detection", self, checkable=True)
         self.act_table_detect.setChecked(False)
         self.act_table_detect.toggled.connect(self._toggle_table_detection)
 
-        # Edit ⇄ View-only swap (checked = Edit mode)
+        # Edit ⇄ View-only swap (checked = Edit mode); app starts in view-only
         self.act_edit_mode = QAction("Edit Mode", self, checkable=True)
-        self.act_edit_mode.setChecked(True)
+        self.act_edit_mode.setChecked(False)
         self.act_edit_mode.toggled.connect(self._toggle_edit_mode)
+
+        self.act_props_panel = QAction("Properties Panel", self, checkable=True)
+        self.act_props_panel.setChecked(True)
+        self.act_props_panel.toggled.connect(self._toggle_properties)
+
+        # Interactive table editing (shown only while Table Detection is on)
+        self.act_table_add_row = QAction("＋ Row", self, triggered=self._table_add_row)
+        self.act_table_add_col = QAction("＋ Column", self, triggered=self._table_add_col)
+        self.act_table_apply = QAction("Apply Table", self, triggered=self._table_apply)
+        for a in (self.act_table_add_row, self.act_table_add_col, self.act_table_apply):
+            a.setVisible(False)
+
+        # Acrobat-style "Recognize Text" — make a scanned page searchable/selectable
+        self.act_recognize_page = QAction("Recognize Text — This Page", self, triggered=lambda: self.recognize_text(False))
+        self.act_recognize_all = QAction("Recognize Text — All Pages", self, triggered=lambda: self.recognize_text(True))
 
         self.act_mode_select = QAction("Select", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
         self.act_mode_add = QAction("Add Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.ADD_TEXT))
@@ -333,7 +349,11 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_redo)
         tb.addAction(self.act_find)
         tb.addSeparator()
-        tb.addAction(self.act_edit_mode)   # Edit ⇄ View-only swap
+        # Edit/View as a labelled switch (off = view-only, the app's start state)
+        self.sw_edit = SwitchButton("Edit Mode", checked=False)
+        self.sw_edit.toggled.connect(self._toggle_edit_mode)
+        tb.addWidget(self.sw_edit)
+        tb.addSeparator()
         tb.addAction(self.act_mode_add)
         tb.addAction(self.act_mode_box)
         tb.addAction(self.act_mode_ocr)
@@ -345,8 +365,19 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.page_label)
         tb.addAction(self.act_next)
         tb.addSeparator()
-        tb.addAction(self.act_para_detect)   # checkable toggle button (orange when on)
-        tb.addAction(self.act_table_detect)  # table-boundary overlay toggle
+        # Detection + panel switches
+        self.sw_para = SwitchButton("Paragraphs", checked=False)
+        self.sw_para.toggled.connect(self._toggle_paragraph_detection)
+        tb.addWidget(self.sw_para)
+        self.sw_table = SwitchButton("Tables", checked=False)
+        self.sw_table.toggled.connect(self._toggle_table_detection)
+        tb.addWidget(self.sw_table)
+        tb.addAction(self.act_table_add_row)
+        tb.addAction(self.act_table_add_col)
+        tb.addAction(self.act_table_apply)
+        self.sw_props = SwitchButton("Properties", checked=True)
+        self.sw_props.toggled.connect(self._toggle_properties)
+        tb.addWidget(self.sw_props)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -397,7 +428,7 @@ class MainWindow(QMainWindow):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         bar.addWidget(spacer)
-        self.mode_status = QLabel("Edit Mode")
+        self.mode_status = QLabel("View Only")
         self.mode_status.setStyleSheet("color: #ff8431; padding-right: 10px; font-weight: 600;")
         bar.addWidget(self.mode_status)
         self._zoom_bar = bar
@@ -432,6 +463,10 @@ class MainWindow(QMainWindow):
         for a in (self.act_mode_add, self.act_mode_box, self.act_mode_ocr):
             m_tools.addAction(a)
         m_tools.addSeparator()
+        m_ocr = m_tools.addMenu("Recognize Text (OCR)")
+        m_ocr.addAction(self.act_recognize_page)
+        m_ocr.addAction(self.act_recognize_all)
+        m_tools.addSeparator()
         m_tools.addAction(self.act_crop)
 
         m_insert = bar.addMenu("Insert")
@@ -457,9 +492,9 @@ class MainWindow(QMainWindow):
         m_view.addSeparator()
         m_view.addAction(self.act_para_detect)
         m_view.addAction(self.act_table_detect)
+        m_view.addAction(self.act_props_panel)
         m_view.addSeparator()
         m_view.addAction(self.pages_dock.toggleViewAction())
-        m_view.addAction(self.props_dock.toggleViewAction())
 
         m_help = bar.addMenu("Help")
         m_help.addAction(self.act_user_guide)
@@ -497,6 +532,8 @@ class MainWindow(QMainWindow):
                   self.act_redact,
                   self.act_export_images, self.act_export_text,
                   self.act_encrypt, self.act_remove_pw,
+                  self.act_recognize_page, self.act_recognize_all,
+                  self.act_table_add_row, self.act_table_add_col, self.act_table_apply,
                   self.act_prev, self.act_next, self.act_zoom_in, self.act_zoom_out,
                   self.act_fit_window):
             a.setEnabled(is_open)
@@ -639,8 +676,8 @@ class MainWindow(QMainWindow):
         self._blocks = struct.analyze_page(self.document, self.current_page) if self._para_detect else []
         self.view.set_page(png, self.zoom, self.current_page, spans, self._blocks)
         notes = self.document.note_annotations(self.current_page)
-        tables = self.document.detect_tables(self.current_page) if self._table_detect else []
-        self.view.set_overlays(notes, tables)
+        grids = self.document.detect_table_grids(self.current_page) if self._table_detect else []
+        self.view.set_overlays(notes, grids)
         self.props.show_selection(None)
         self._sel_span = self._sel_block = None
         w, h = self.document.page_size(self.current_page)
@@ -1317,8 +1354,16 @@ class MainWindow(QMainWindow):
         if self._find_dialog:
             self._find_dialog.set_status(msg)
 
+    def _sync_toggle(self, switch, action, on):
+        """Keep a toolbar switch and its menu action in sync without re-firing handlers."""
+        if switch is not None:
+            switch.blockSignals(True); switch.setChecked(on); switch.blockSignals(False)
+        if action is not None:
+            action.blockSignals(True); action.setChecked(on); action.blockSignals(False)
+
     def _toggle_paragraph_detection(self, on: bool):
         self._para_detect = on
+        self._sync_toggle(self.sw_para, self.act_para_detect, on)
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if isinstance(w, DocumentTab):
@@ -1330,9 +1375,76 @@ class MainWindow(QMainWindow):
 
     def _toggle_table_detection(self, on: bool):
         self._table_detect = on
+        self._sync_toggle(self.sw_table, self.act_table_detect, on)
+        self.act_table_add_row.setVisible(on)
+        self.act_table_add_col.setVisible(on)
+        self.act_table_apply.setVisible(on)
         if self.tab() is not None:
             self.render_current_page()
-        self.status("Table detection " + ("on — detected tables are outlined." if on else "off."))
+        self.status("Table detection on — drag dividers to resize; use Add Row/Column, then Apply."
+                    if on else "Table detection off.")
+
+    def _toggle_properties(self, on: bool):
+        self._sync_toggle(self.sw_props, self.act_props_panel, on)
+        self.props_dock.setVisible(on)
+        self.status("Properties panel shown." if on else "Properties panel hidden.")
+
+    # -- interactive table editing -----------------------------------------
+
+    def _table_add_row(self):
+        if self.tab() is None:
+            return
+        self.view.add_table_row()
+        self.status("Row divider added — drag it to position, then Apply.")
+
+    def _table_add_col(self):
+        if self.tab() is None:
+            return
+        self.view.add_table_col()
+        self.status("Column divider added — drag it to position, then Apply.")
+
+    def _table_apply(self):
+        if self.tab() is None:
+            return
+        grids = self.view.table_grids()
+        if not grids:
+            self.status("No table to apply. Turn on Tables over a page with a table.")
+            return
+        self._snapshot()
+        self.document.draw_table_grids(self.current_page, grids)
+        self.render_current_page()
+        self._refresh_thumbnail(self.current_page)
+        self._update_title()
+        self.status("Table gridlines applied to the page.")
+
+    # -- Acrobat-style Recognize Text (searchable layer) -------------------
+
+    def recognize_text(self, all_pages: bool):
+        if self.tab() is None:
+            return
+        pages = range(self.document.page_count) if all_pages else [self.current_page]
+        self.status("Recognizing text…")
+        QApplication.processEvents()
+        self._snapshot()
+        total = 0
+        engine_used = ""
+        try:
+            for i in pages:
+                n, engine_used = self.editor.recognize_text_searchable(i)
+                total += n
+        except Exception as e:
+            if self._undo_stack:
+                self._undo_stack.pop()
+            self._update_undo_actions()
+            from .preflight import tesseract_install_hint
+            QMessageBox.warning(self, "OCR unavailable",
+                                f"Couldn't recognize text.\n\n{e}\n\nOffline engine: {tesseract_install_hint()}")
+            return
+        self.render_current_page()
+        self._update_title()
+        scope = "all pages" if all_pages else f"page {self.current_page + 1}"
+        self.status(f"Recognized {total} words on {scope} via {engine_used}. "
+                    f"Text is now selectable & searchable.")
 
     def _editing_actions(self):
         return [
@@ -1345,7 +1457,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_edit_mode(self, on: bool):
         self._view_only = not on
-        self.act_edit_mode.setText("Edit Mode" if on else "View Only")
+        self._sync_toggle(self.sw_edit, self.act_edit_mode, on)
         self.mode_status.setText("Edit Mode" if on else "View Only")
         for a in self._editing_actions():
             a.setEnabled(on and self.document.is_open)
@@ -1357,7 +1469,7 @@ class MainWindow(QMainWindow):
             else:
                 self.view.set_mode(Mode.VIEW)
         self.status("Edit mode — full editing enabled." if on
-                    else "View Only — read-only; toggle Edit Mode to make changes.")
+                    else "View Only — read-only; turn on Edit Mode to make changes.")
 
     # -- help / about ------------------------------------------------------
 
