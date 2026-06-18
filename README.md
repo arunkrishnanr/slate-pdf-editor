@@ -42,6 +42,17 @@ This is the same mechanism real editors use: the actual content of the PDF chang
   or landscape, for the current page or all pages. Choose **scale-to-fit** or
   **keep-canvas** — both keep the text fully editable afterwards.
 - **Add text** — drop new text anywhere, choosing font and size.
+- **Undo / Redo** — every edit and page operation is reversible (⌘/Ctrl+Z, ⇧⌘/Ctrl+Y).
+- **Find & Replace** — search, jump between matches, and replace across the document (⌘/Ctrl+F).
+- **Markup** — highlight, underline, strikethrough, sticky notes, rectangle/line/freehand, and a
+  permanent **redaction** (black-out) tool.
+- **Insert** — merge pages from another PDF, insert a blank page, duplicate a page, place an image.
+- **Crop** a page to a drawn region.
+- **Export** — pages to PNG images, or the document text to a `.txt` file. **Print / Print Preview**.
+- **Security** — open password-protected PDFs (you supply the password), set a password on a copy,
+  or remove the password / owner restrictions from a document you've opened. *(No password cracking —
+  files you can't open stay closed.)*
+- **Paragraph detection toggle** — turn whole-paragraph editing on/off (View menu).
 - **OCR fallback** — for non-editable / scanned pages, drag a box over the text. Slate runs
   **Tesseract**, shows you the recognized text to correct, then removes the original and
   places your corrected line in the same spot.

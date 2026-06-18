@@ -31,6 +31,23 @@ class Mode(Enum):
     ADD_TEXT = auto()
     TEXT_BOX = auto()
     OCR_REGION = auto()
+    IMAGE = auto()
+    REDACT = auto()
+    HIGHLIGHT = auto()
+    UNDERLINE = auto()
+    STRIKE = auto()
+    SHAPE_RECT = auto()
+    SHAPE_LINE = auto()
+    NOTE = auto()
+    INK = auto()
+    CROP = auto()
+
+
+# Tools driven by dragging a rubber-band rectangle.
+RUBBER_MODES = {
+    Mode.OCR_REGION, Mode.TEXT_BOX, Mode.IMAGE, Mode.REDACT, Mode.CROP,
+    Mode.HIGHLIGHT, Mode.UNDERLINE, Mode.STRIKE, Mode.SHAPE_RECT, Mode.SHAPE_LINE,
+}
 
 
 class _ParagraphEdit(QPlainTextEdit):
@@ -61,6 +78,9 @@ class PageView(QGraphicsView):
     addTextRequested = Signal(float, float) # PDF point x, y
     textBoxRequested = Signal(tuple)        # (x0, y0, x1, y1) for a new text box
     ocrRegionRequested = Signal(tuple)      # (x0, y0, x1, y1) in PDF points
+    rectToolFinished = Signal(object, tuple)  # (Mode, rect_pts) for image/redact/markup/shape
+    pointToolClicked = Signal(object, float, float)  # (Mode, x, y) for note
+    inkFinished = Signal(list)              # list of (x, y) PDF points for freehand
     zoomRequested = Signal(float)           # zoom factor delta
 
     def __init__(self, parent=None):
@@ -88,6 +108,10 @@ class PageView(QGraphicsView):
 
         self._rubber: Optional[QRubberBand] = None
         self._rubber_origin = QPointF()
+        self._dragging = False
+
+        self._ink_points: list = []
+        self._ink_items: list = []
 
         self.setMouseTracking(True)
 
@@ -102,7 +126,7 @@ class PageView(QGraphicsView):
         self._cancel_inline_edit()
         if mode == Mode.SELECT:
             self.viewport().setCursor(Qt.ArrowCursor)
-        elif mode == Mode.ADD_TEXT:
+        elif mode in (Mode.ADD_TEXT, Mode.NOTE):
             self.viewport().setCursor(Qt.IBeamCursor)
         else:
             self.viewport().setCursor(Qt.CrossCursor)
@@ -189,10 +213,18 @@ class PageView(QGraphicsView):
         if self._mode == Mode.SELECT:
             span = self._span_at(scene_pt)
             self._show_hover(span)
-        elif self._mode in (Mode.OCR_REGION, Mode.TEXT_BOX) and self._rubber is not None \
-                and self._rubber.isVisible():
+        elif self._mode in RUBBER_MODES and self._dragging and self._rubber is not None:
             rect = QRect(self._rubber_origin.toPoint(), event.position().toPoint()).normalized()
             self._rubber.setGeometry(rect)
+        elif self._mode == Mode.INK and self._ink_points:
+            x, y = scene_pt.x() / self._zoom, scene_pt.y() / self._zoom
+            prev = self._ink_points[-1]
+            self._ink_points.append((x, y))
+            line = self._scene.addLine(prev[0] * self._zoom, prev[1] * self._zoom,
+                                       x * self._zoom, y * self._zoom,
+                                       QPen(QColor(30, 30, 230), 2))
+            line.setZValue(11)
+            self._ink_items.append(line)
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
@@ -215,7 +247,13 @@ class PageView(QGraphicsView):
                 self._cancel_inline_edit()
         elif self._mode == Mode.ADD_TEXT:
             self.addTextRequested.emit(scene_pt.x() / self._zoom, scene_pt.y() / self._zoom)
-        elif self._mode in (Mode.OCR_REGION, Mode.TEXT_BOX):
+        elif self._mode == Mode.NOTE:
+            self.pointToolClicked.emit(self._mode, scene_pt.x() / self._zoom, scene_pt.y() / self._zoom)
+        elif self._mode == Mode.INK:
+            self._ink_points = [(scene_pt.x() / self._zoom, scene_pt.y() / self._zoom)]
+            self._ink_items = []
+        elif self._mode in RUBBER_MODES:
+            self._dragging = True
             self._rubber_origin = event.position()
             if self._rubber is None:
                 self._rubber = QRubberBand(QRubberBand.Rectangle, self.viewport())
@@ -224,19 +262,39 @@ class PageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._mode in (Mode.OCR_REGION, Mode.TEXT_BOX) and self._rubber is not None \
-                and self._rubber.isVisible():
-            geo = self._rubber.geometry()
-            self._rubber.hide()
-            p0 = self.mapToScene(geo.topLeft())
-            p1 = self.mapToScene(geo.bottomRight())
+        if self._mode in RUBBER_MODES and self._dragging:
+            self._dragging = False
+            if self._rubber is not None:
+                self._rubber.hide()
+            # Compute the rect from the press origin to the release point directly, so it
+            # works even if intermediate move events weren't delivered.
+            p0 = self.mapToScene(self._rubber_origin.toPoint())
+            p1 = self.mapToScene(event.position().toPoint())
             rect_pts = (min(p0.x(), p1.x()) / self._zoom, min(p0.y(), p1.y()) / self._zoom,
                         max(p0.x(), p1.x()) / self._zoom, max(p0.y(), p1.y()) / self._zoom)
-            if (rect_pts[2] - rect_pts[0]) > 3 and (rect_pts[3] - rect_pts[1]) > 3:
+            w = rect_pts[2] - rect_pts[0]
+            h = rect_pts[3] - rect_pts[1]
+            # Text-markup tools accept a thin horizontal swipe; box tools need real area.
+            markup = self._mode in (Mode.HIGHLIGHT, Mode.UNDERLINE, Mode.STRIKE)
+            ok = (w > 3 and h > 3) or (markup and w > 6)
+            if ok:
                 if self._mode == Mode.OCR_REGION:
                     self.ocrRegionRequested.emit(rect_pts)
-                else:
+                elif self._mode == Mode.TEXT_BOX:
                     self.textBoxRequested.emit(rect_pts)
+                else:
+                    self.rectToolFinished.emit(self._mode, rect_pts)
+        elif self._mode == Mode.INK and self._ink_points:
+            for it in self._ink_items:
+                try:
+                    self._scene.removeItem(it)
+                except Exception:
+                    pass
+            self._ink_items = []
+            pts = self._ink_points
+            self._ink_points = []
+            if len(pts) >= 2:
+                self.inkFinished.emit(pts)
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):

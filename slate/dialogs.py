@@ -306,6 +306,35 @@ Tesseract, lets you correct it, then removes the original and places your text i
 same spot.</li>
 </ul>
 
+<h3>Markup &amp; redaction (Markup menu)</h3>
+<ul>
+<li><b>Highlight / Underline / Strikethrough</b>: drag over text.</li>
+<li><b>Sticky Note</b>: click to drop a note; <b>Rectangle / Line / Freehand</b>: drag to draw.</li>
+<li><b>Redact</b>: drag over content to <b>permanently remove</b> it (black-out).</li>
+</ul>
+
+<h3>Insert (Insert menu)</h3>
+<ul>
+<li><b>Image</b>: pick a file, then drag a box to place it.</li>
+<li><b>Pages from PDF</b>: merge another PDF in after the current page.
+<b>Blank Page</b>, <b>Duplicate Current Page</b>.</li>
+</ul>
+
+<h3>Undo, find, crop</h3>
+<ul>
+<li><b>Edit ▸ Undo / Redo</b> (⌘/Ctrl+Z, ⇧⌘/Ctrl+Y) covers every change.</li>
+<li><b>Edit ▸ Find &amp; Replace</b> (⌘/Ctrl+F): search, navigate matches, replace all.</li>
+<li><b>Tools ▸ Crop Page</b>: drag the area to keep.</li>
+<li><b>View ▸ Paragraph Detection</b>: toggle whole-paragraph editing on/off.</li>
+</ul>
+
+<h3>Export &amp; security (File menu)</h3>
+<ul>
+<li><b>Export ▸ Pages as Images / Text</b>.</li>
+<li><b>Security ▸ Set Password</b> (encrypt a copy); <b>Remove Password / Restrictions</b>
+(on a document you've opened). Protected files prompt for the password on open.</li>
+</ul>
+
 <h3>Organize pages</h3>
 <ul>
 <li>Left panel: drag thumbnails to reorder; <b>Delete</b>, <b>Rotate</b>,

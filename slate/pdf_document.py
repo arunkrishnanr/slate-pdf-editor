@@ -246,6 +246,173 @@ class PdfDocument:
 
     # -- saving ------------------------------------------------------------
 
+    # -- page insertion / merge / export ----------------------------------
+
+    def insert_pdf(self, other_path: str, at_index: int) -> int:
+        """Insert all pages of another PDF after `at_index`. Returns pages added."""
+        other = fitz.open(other_path)
+        n = other.page_count
+        self.doc.insert_pdf(other, start_at=at_index + 1)
+        other.close()
+        self.dirty = True
+        return n
+
+    def insert_blank_page(self, at_index: int, width: float, height: float):
+        self.doc.new_page(pno=at_index + 1, width=width, height=height)
+        self.dirty = True
+
+    def duplicate_page(self, index: int):
+        to = index + 1
+        if to >= self.doc.page_count:
+            to = -1  # append (immediately after the last page)
+        self.doc.fullcopy_page(index, to)
+        self.dirty = True
+
+    def export_images(self, folder: str, dpi: int = 150) -> int:
+        """Render every page to a PNG in `folder`. Returns count."""
+        zoom = dpi / 72.0
+        for i in range(self.page_count):
+            png = self.render_page_png(i, zoom)
+            with open(os.path.join(folder, f"page_{i + 1:03d}.png"), "wb") as fh:
+                fh.write(png)
+        return self.page_count
+
+    def export_text(self, path: str):
+        parts = []
+        for i in range(self.page_count):
+            parts.append(self.doc[i].get_text("text"))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\f".join(parts))  # form-feed between pages
+
+    def crop_page(self, index: int, rect_pts: tuple[float, float, float, float]):
+        """Crop a page to the given rectangle (in points)."""
+        page = self.doc[index]
+        r = fitz.Rect(rect_pts) & page.rect
+        if not r.is_empty:
+            page.set_cropbox(r)
+            self.dirty = True
+
+    # -- images ------------------------------------------------------------
+
+    def insert_image(self, page_index: int, rect_pts: tuple, image_path: str):
+        page = self.doc[page_index]
+        page.insert_image(fitz.Rect(rect_pts), filename=image_path)
+        self.dirty = True
+
+    def extract_images(self, folder: str) -> int:
+        count = 0
+        for i in range(self.page_count):
+            for img in self.doc.get_page_images(i, full=True):
+                xref = img[0]
+                try:
+                    info = self.doc.extract_image(xref)
+                    ext = info.get("ext", "png")
+                    with open(os.path.join(folder, f"image_p{i+1:03d}_{xref}.{ext}"), "wb") as fh:
+                        fh.write(info["image"])
+                    count += 1
+                except Exception:
+                    continue
+        return count
+
+    def image_rects(self, page_index: int) -> list[fitz.Rect]:
+        """Bounding boxes of images on a page (for click-to-delete)."""
+        page = self.doc[page_index]
+        rects = []
+        for img in self.doc.get_page_images(page_index, full=True):
+            try:
+                for r in page.get_image_rects(img[0]):
+                    rects.append(r)
+            except Exception:
+                continue
+        return rects
+
+    # -- redaction (true, permanent removal) ------------------------------
+
+    def redact(self, page_index: int, rect_pts: tuple, fill=(0, 0, 0)):
+        """Permanently remove content under a rectangle (black-out by default)."""
+        page = self.doc[page_index]
+        page.add_redact_annot(fitz.Rect(rect_pts), fill=fill)
+        page.apply_redactions()
+        self.dirty = True
+
+    # -- annotations -------------------------------------------------------
+
+    def annotate_text_markup(self, page_index: int, rect_pts: tuple, kind: str,
+                             color=(1, 0.85, 0)):
+        """Highlight / underline / strikeout the text within a rectangle."""
+        page = self.doc[page_index]
+        rect = fitz.Rect(rect_pts)
+        if kind == "highlight":
+            annot = page.add_highlight_annot(rect)
+        elif kind == "underline":
+            annot = page.add_underline_annot(rect)
+        elif kind == "strikeout":
+            annot = page.add_strikeout_annot(rect)
+        else:
+            return
+        if kind == "highlight":
+            annot.set_colors(stroke=color)
+        annot.update()
+        self.dirty = True
+
+    def add_note(self, page_index: int, point: tuple, text: str):
+        page = self.doc[page_index]
+        annot = page.add_text_annot(fitz.Point(*point), text)
+        annot.update()
+        self.dirty = True
+
+    def add_shape(self, page_index: int, rect_pts: tuple, kind: str,
+                  color=(0.85, 0.1, 0.1), width: float = 1.5):
+        page = self.doc[page_index]
+        r = fitz.Rect(rect_pts)
+        if kind == "rect":
+            annot = page.add_rect_annot(r)
+        elif kind == "line":
+            annot = page.add_line_annot(r.tl, r.br)
+        else:
+            return
+        annot.set_colors(stroke=color)
+        annot.set_border(width=width)
+        annot.update()
+        self.dirty = True
+
+    def add_ink(self, page_index: int, points_pts: list, color=(0.1, 0.1, 0.9), width: float = 1.5):
+        if len(points_pts) < 2:
+            return
+        page = self.doc[page_index]
+        stroke = [(float(p[0]), float(p[1])) for p in points_pts]
+        annot = page.add_ink_annot([stroke])
+        annot.set_colors(stroke=color)
+        annot.set_border(width=width)
+        annot.update()
+        self.dirty = True
+
+    # -- encryption / password --------------------------------------------
+
+    @property
+    def needs_password(self) -> bool:
+        return bool(self.doc and self.doc.needs_pass)
+
+    @property
+    def is_encrypted(self) -> bool:
+        return bool(self.doc and self.doc.is_encrypted)
+
+    def authenticate(self, password: str) -> bool:
+        return bool(self.doc.authenticate(password))
+
+    def save_encrypted(self, path: str, user_pw: str, owner_pw: str):
+        perm = int(
+            fitz.PDF_PERM_ACCESSIBILITY | fitz.PDF_PERM_PRINT | fitz.PDF_PERM_COPY |
+            fitz.PDF_PERM_ANNOTATE
+        )
+        self.doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256,
+                      owner_pw=owner_pw or user_pw, user_pw=user_pw,
+                      permissions=perm, garbage=4, deflate=True)
+
+    def save_decrypted(self, path: str):
+        """Write a copy with no encryption / no restrictions (requires the doc be open)."""
+        self.doc.save(path, encryption=fitz.PDF_ENCRYPT_NONE, garbage=4, deflate=True)
+
     def save(self, path: Optional[str] = None):
         target = path or self.path
         if not target:

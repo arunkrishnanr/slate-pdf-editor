@@ -11,6 +11,7 @@ from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QDockWidget, QToolBar, QLabel,
     QStatusBar, QApplication, QComboBox, QWidget, QSizePolicy, QDialog,
+    QInputDialog, QLineEdit,
 )
 
 from . import __app_name__, __version__
@@ -65,7 +66,11 @@ class MainWindow(QMainWindow):
         self.view.addTextRequested.connect(self._on_add_text)
         self.view.textBoxRequested.connect(self._on_text_box)
         self.view.ocrRegionRequested.connect(self._on_ocr_region)
+        self.view.rectToolFinished.connect(self._on_rect_tool)
+        self.view.pointToolClicked.connect(self._on_point_tool)
+        self.view.inkFinished.connect(self._on_ink)
         self.view.zoomRequested.connect(self._on_zoom_factor)
+        self._pending_image: str | None = None
 
         # Pages dock
         self.pages = PagesPanel()
@@ -129,6 +134,29 @@ class MainWindow(QMainWindow):
         self.act_mode_select.setChecked(True)
 
         self.act_page_size = QAction("Page Size…", self, triggered=self.change_page_size)
+        self.act_crop = QAction("Crop Page", self, checkable=True, triggered=lambda: self.set_mode(Mode.CROP))
+
+        # Insert
+        self.act_insert_image = QAction("Image…", self, triggered=self.insert_image)
+        self.act_insert_pdf = QAction("Pages from PDF…", self, triggered=self.insert_pdf_pages)
+        self.act_insert_blank = QAction("Blank Page", self, triggered=self.insert_blank_page)
+        self.act_duplicate_page = QAction("Duplicate Current Page", self, triggered=self.duplicate_page)
+
+        # Markup tools (checkable, share the tool-mode group)
+        self.act_mk_highlight = QAction("Highlight", self, checkable=True, triggered=lambda: self.set_mode(Mode.HIGHLIGHT))
+        self.act_mk_underline = QAction("Underline", self, checkable=True, triggered=lambda: self.set_mode(Mode.UNDERLINE))
+        self.act_mk_strike = QAction("Strikethrough", self, checkable=True, triggered=lambda: self.set_mode(Mode.STRIKE))
+        self.act_mk_note = QAction("Sticky Note", self, checkable=True, triggered=lambda: self.set_mode(Mode.NOTE))
+        self.act_mk_rect = QAction("Rectangle", self, checkable=True, triggered=lambda: self.set_mode(Mode.SHAPE_RECT))
+        self.act_mk_line = QAction("Line", self, checkable=True, triggered=lambda: self.set_mode(Mode.SHAPE_LINE))
+        self.act_mk_ink = QAction("Freehand", self, checkable=True, triggered=lambda: self.set_mode(Mode.INK))
+        self.act_redact = QAction("Redact (black out)", self, checkable=True, triggered=lambda: self.set_mode(Mode.REDACT))
+
+        # Export & security
+        self.act_export_images = QAction("Export Pages as Images…", self, triggered=self.export_images)
+        self.act_export_text = QAction("Export Text…", self, triggered=self.export_text)
+        self.act_encrypt = QAction("Set Password…", self, triggered=self.set_password)
+        self.act_remove_pw = QAction("Remove Password / Restrictions…", self, triggered=self.remove_password)
 
         self.act_prev = QAction("◀", self, triggered=self.prev_page)
         self.act_next = QAction("▶", self, triggered=self.next_page)
@@ -184,6 +212,13 @@ class MainWindow(QMainWindow):
         for a in (self.act_new, self.act_open, self.act_save, self.act_save_as, self.act_export):
             m_file.addAction(a)
         m_file.addSeparator()
+        m_export = m_file.addMenu("Export")
+        m_export.addAction(self.act_export_images)
+        m_export.addAction(self.act_export_text)
+        m_security = m_file.addMenu("Security")
+        m_security.addAction(self.act_encrypt)
+        m_security.addAction(self.act_remove_pw)
+        m_file.addSeparator()
         m_file.addAction(self.act_print)
         m_file.addAction(self.act_print_preview)
         m_file.addSeparator()
@@ -198,6 +233,20 @@ class MainWindow(QMainWindow):
         m_tools = bar.addMenu("Tools")
         for a in (self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr):
             m_tools.addAction(a)
+        m_tools.addSeparator()
+        m_tools.addAction(self.act_crop)
+
+        m_insert = bar.addMenu("Insert")
+        for a in (self.act_insert_image, self.act_insert_pdf, self.act_insert_blank,
+                  self.act_duplicate_page):
+            m_insert.addAction(a)
+
+        m_markup = bar.addMenu("Markup")
+        for a in (self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike,
+                  self.act_mk_note, self.act_mk_rect, self.act_mk_line, self.act_mk_ink):
+            m_markup.addAction(a)
+        m_markup.addSeparator()
+        m_markup.addAction(self.act_redact)
 
         m_page = bar.addMenu("Page")
         m_page.addAction(self.act_page_size)
@@ -239,7 +288,14 @@ class MainWindow(QMainWindow):
         for a in (self.act_save, self.act_save_as, self.act_export,
                   self.act_print, self.act_print_preview, self.act_find,
                   self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr,
-                  self.act_page_size,
+                  self.act_page_size, self.act_crop,
+                  self.act_insert_image, self.act_insert_pdf, self.act_insert_blank,
+                  self.act_duplicate_page,
+                  self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike,
+                  self.act_mk_note, self.act_mk_rect, self.act_mk_line, self.act_mk_ink,
+                  self.act_redact,
+                  self.act_export_images, self.act_export_text,
+                  self.act_encrypt, self.act_remove_pw,
                   self.act_prev, self.act_next, self.act_zoom_in, self.act_zoom_out):
             a.setEnabled(is_open)
 
@@ -248,15 +304,34 @@ class MainWindow(QMainWindow):
 
     def set_mode(self, mode: Mode):
         self.view.set_mode(mode)
-        self.act_mode_select.setChecked(mode == Mode.SELECT)
-        self.act_mode_add.setChecked(mode == Mode.ADD_TEXT)
-        self.act_mode_box.setChecked(mode == Mode.TEXT_BOX)
-        self.act_mode_ocr.setChecked(mode == Mode.OCR_REGION)
-        names = {Mode.SELECT: "Edit Text — click a line, or a paragraph to reflow it",
-                 Mode.ADD_TEXT: "Add Text — click where you want new text",
-                 Mode.TEXT_BOX: "Text Box — drag a box, then type wrapping text",
-                 Mode.OCR_REGION: "OCR Region — drag a box over non-editable text"}
-        self.status(names[mode])
+        mode_actions = {
+            Mode.SELECT: self.act_mode_select, Mode.ADD_TEXT: self.act_mode_add,
+            Mode.TEXT_BOX: self.act_mode_box, Mode.OCR_REGION: self.act_mode_ocr,
+            Mode.CROP: self.act_crop, Mode.HIGHLIGHT: self.act_mk_highlight,
+            Mode.UNDERLINE: self.act_mk_underline, Mode.STRIKE: self.act_mk_strike,
+            Mode.NOTE: self.act_mk_note, Mode.SHAPE_RECT: self.act_mk_rect,
+            Mode.SHAPE_LINE: self.act_mk_line, Mode.INK: self.act_mk_ink,
+            Mode.REDACT: self.act_redact,
+        }
+        for m, act in mode_actions.items():
+            act.setChecked(m == mode)
+        names = {
+            Mode.SELECT: "Edit Text — click a line, or a paragraph to reflow it",
+            Mode.ADD_TEXT: "Add Text — click where you want new text",
+            Mode.TEXT_BOX: "Text Box — drag a box, then type wrapping text",
+            Mode.OCR_REGION: "OCR Region — drag a box over non-editable text",
+            Mode.IMAGE: "Insert Image — drag a box to place the image",
+            Mode.REDACT: "Redact — drag over content to permanently black it out",
+            Mode.CROP: "Crop — drag the area to keep",
+            Mode.HIGHLIGHT: "Highlight — drag over text",
+            Mode.UNDERLINE: "Underline — drag over text",
+            Mode.STRIKE: "Strikethrough — drag over text",
+            Mode.NOTE: "Sticky Note — click to place a note",
+            Mode.SHAPE_RECT: "Rectangle — drag to draw",
+            Mode.SHAPE_LINE: "Line — drag to draw",
+            Mode.INK: "Freehand — drag to draw",
+        }
+        self.status(names.get(mode, ""))
 
     # -- file ops ----------------------------------------------------------
 
@@ -279,6 +354,11 @@ class MainWindow(QMainWindow):
             self.document.open(path)
         except Exception as e:
             QMessageBox.critical(self, "Could not open", str(e))
+            return
+        if self.document.needs_password and not self._prompt_password():
+            self.document.close()
+            self.status("Open cancelled — password required.")
+            self._after_document_changed()
             return
         self.current_page = 0
         self._reset_history()
@@ -430,7 +510,7 @@ class MainWindow(QMainWindow):
 
     def _on_add_text(self, x: float, y: float):
         dlg = AddTextDialog(fm.index().families(), self)
-        if dlg.exec() != dlg.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         text, family, size = dlg.values()
         if not text.strip():
@@ -473,7 +553,7 @@ class MainWindow(QMainWindow):
     def _on_text_box(self, rect_pts: tuple):
         dlg = AddTextDialog(fm.index().families(), self)
         dlg.setWindowTitle("Text box")
-        if dlg.exec() != dlg.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         text, family, size = dlg.values()
         if not text.strip():
@@ -513,7 +593,7 @@ class MainWindow(QMainWindow):
         w, h = self.document.page_size(self.current_page)
         current = ps.nearest_standard(w, h)
         dlg = PageSizeDialog(current, self.document.page_count, self)
-        if dlg.exec() != dlg.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         width, height, apply_all, scale = dlg.result_values()
         indices = list(range(self.document.page_count)) if apply_all else [self.current_page]
@@ -544,7 +624,7 @@ class MainWindow(QMainWindow):
         median_size = sizes[len(sizes) // 2]
 
         dlg = OcrReviewDialog(recognized, self)
-        if dlg.exec() != dlg.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         corrected = dlg.text().strip()
 
@@ -691,6 +771,178 @@ class MainWindow(QMainWindow):
                 painter.drawImage(0, 0, img)
         finally:
             painter.end()
+
+    # -- markup / images / redaction tools ---------------------------------
+
+    def _on_rect_tool(self, mode, rect):
+        from .canvas import Mode as M
+        self._snapshot()
+        try:
+            if mode == M.IMAGE:
+                if not self._pending_image:
+                    return
+                self.document.insert_image(self.current_page, rect, self._pending_image)
+                self._pending_image = None
+                self.set_mode(M.SELECT)
+                self.status("Image inserted.")
+            elif mode == M.REDACT:
+                self.document.redact(self.current_page, rect, fill=(0, 0, 0))
+                self.status("Redacted — content permanently removed.")
+            elif mode == M.CROP:
+                self.document.crop_page(self.current_page, rect)
+                self.status("Page cropped.")
+            elif mode in (M.HIGHLIGHT, M.UNDERLINE, M.STRIKE):
+                kind = {M.HIGHLIGHT: "highlight", M.UNDERLINE: "underline", M.STRIKE: "strikeout"}[mode]
+                self.document.annotate_text_markup(self.current_page, rect, kind)
+                self.status(f"{kind.capitalize()} added.")
+            elif mode in (M.SHAPE_RECT, M.SHAPE_LINE):
+                kind = "rect" if mode == M.SHAPE_RECT else "line"
+                self.document.add_shape(self.current_page, rect, kind)
+                self.status(f"{kind.capitalize()} drawn.")
+        except Exception as e:
+            if self._undo_stack:
+                self._undo_stack.pop()  # the operation failed; drop its snapshot
+            self._update_undo_actions()
+            QMessageBox.warning(self, "Action failed", str(e))
+            return
+        self.render_current_page()
+        self._refresh_thumbnail(self.current_page)
+        self._update_title()
+
+    def _on_point_tool(self, mode, x, y):
+        from .canvas import Mode as M
+        if mode == M.NOTE:
+            text, ok = QInputDialog.getMultiLineText(self, "Sticky note", "Note text:")
+            if not ok or not text.strip():
+                return
+            self._snapshot()
+            self.document.add_note(self.current_page, (x, y), text)
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self.status("Note added.")
+
+    def _on_ink(self, points):
+        self._snapshot()
+        self.document.add_ink(self.current_page, points)
+        self.render_current_page()
+        self._refresh_thumbnail(self.current_page)
+        self.status("Freehand drawing added.")
+
+    # -- insert / duplicate ------------------------------------------------
+
+    def insert_image(self):
+        if not self.document.is_open:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Choose an image", "",
+                                              "Images (*.png *.jpg *.jpeg *.bmp *.gif *.tiff)")
+        if not path:
+            return
+        self._pending_image = path
+        self.set_mode(Mode.IMAGE)
+
+    def insert_pdf_pages(self):
+        if not self.document.is_open:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Insert pages from PDF", "", "PDF files (*.pdf)")
+        if not path:
+            return
+        self._snapshot()
+        try:
+            n = self.document.insert_pdf(path, self.current_page)
+        except Exception as e:
+            QMessageBox.critical(self, "Insert failed", str(e))
+            return
+        self._after_document_changed()
+        self.status(f"Inserted {n} page(s) after page {self.current_page + 1}.")
+
+    def insert_blank_page(self):
+        if not self.document.is_open:
+            return
+        w, h = self.document.page_size(self.current_page)
+        self._snapshot()
+        self.document.insert_blank_page(self.current_page, w, h)
+        self.current_page += 1
+        self._after_document_changed()
+        self.status("Blank page inserted.")
+
+    def duplicate_page(self):
+        if not self.document.is_open:
+            return
+        self._snapshot()
+        self.document.duplicate_page(self.current_page)
+        self._after_document_changed()
+        self.status("Page duplicated.")
+
+    # -- export ------------------------------------------------------------
+
+    def export_images(self):
+        if not self.document.is_open:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Export pages as PNG images to…")
+        if not folder:
+            return
+        n = self.document.export_images(folder, dpi=150)
+        self.status(f"Exported {n} page image(s) to {os.path.basename(folder)}.")
+
+    def export_text(self):
+        if not self.document.is_open:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export text", "document.txt", "Text (*.txt)")
+        if not path:
+            return
+        self.document.export_text(path)
+        self.status(f"Exported text to {os.path.basename(path)}.")
+
+    # -- password / security ----------------------------------------------
+
+    def set_password(self):
+        if not self.document.is_open:
+            return
+        pw, ok = QInputDialog.getText(self, "Set password",
+                                      "Open password (leave blank to cancel):",
+                                      QLineEdit.Password)
+        if not ok or not pw:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save encrypted PDF as",
+                                              self.document.path or "protected.pdf", "PDF files (*.pdf)")
+        if not path:
+            return
+        try:
+            self.document.save_encrypted(path, user_pw=pw, owner_pw=pw)
+            self.status(f"Saved password-protected copy: {os.path.basename(path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Encryption failed", str(e))
+
+    def _prompt_password(self) -> bool:
+        """Prompt for the open password (up to 3 tries). Returns True if authenticated."""
+        for _ in range(3):
+            pw, ok = QInputDialog.getText(self, "Password required",
+                                          "This PDF is protected. Enter its password:",
+                                          QLineEdit.Password)
+            if not ok:
+                return False
+            if self.document.authenticate(pw):
+                return True
+            QMessageBox.warning(self, "Wrong password", "That password didn't work. Try again.")
+        return False
+
+    def remove_password(self):
+        """Remove encryption/owner-restrictions. Requires the document to already be open
+        (i.e. you provided the password on open, or it was owner-restricted only)."""
+        if not self.document.is_open:
+            return
+        if not self.document.is_encrypted:
+            QMessageBox.information(self, "Not protected", "This PDF has no password or restrictions.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save unprotected copy as",
+                                              "unprotected.pdf", "PDF files (*.pdf)")
+        if not path:
+            return
+        try:
+            self.document.save_decrypted(path)
+            self.status(f"Saved unprotected copy: {os.path.basename(path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Failed", str(e))
 
     # -- undo / redo -------------------------------------------------------
 
