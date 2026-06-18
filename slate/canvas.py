@@ -20,7 +20,7 @@ from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QRect
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush
 from PySide6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QLineEdit, QRubberBand,
-    QGraphicsRectItem,
+    QGraphicsRectItem, QPlainTextEdit,
 )
 
 from .pdf_document import TextSpan
@@ -29,13 +29,37 @@ from .pdf_document import TextSpan
 class Mode(Enum):
     SELECT = auto()
     ADD_TEXT = auto()
+    TEXT_BOX = auto()
     OCR_REGION = auto()
+
+
+class _ParagraphEdit(QPlainTextEdit):
+    """Multi-line editor overlay for paragraphs. Commits on Ctrl/Cmd+Enter or focus-out."""
+    committed = Signal()
+    cancelled = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.cancelled.emit()
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and \
+                (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
+            self.committed.emit()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.committed.emit()
 
 
 class PageView(QGraphicsView):
     spanActivated = Signal(object)          # TextSpan to edit
     commitEdit = Signal(object, str)        # (TextSpan, new_text)
+    commitBlockEdit = Signal(object, str)   # (Block, new_text) — paragraph reflow
+    selected = Signal(object, object)       # (TextSpan|None, Block|None) for properties panel
     addTextRequested = Signal(float, float) # PDF point x, y
+    textBoxRequested = Signal(tuple)        # (x0, y0, x1, y1) for a new text box
     ocrRegionRequested = Signal(tuple)      # (x0, y0, x1, y1) in PDF points
     zoomRequested = Signal(float)           # zoom factor delta
 
@@ -51,11 +75,14 @@ class PageView(QGraphicsView):
         self._zoom = 1.5
         self._page_index = 0
         self._spans: list[TextSpan] = []
+        self._blocks: list = []
         self._hover_item: Optional[QGraphicsRectItem] = None
         self._mode = Mode.SELECT
 
         self._editor: Optional[QLineEdit] = None
         self._editing_span: Optional[TextSpan] = None
+        self._block_editor: Optional[QPlainTextEdit] = None
+        self._editing_block = None
 
         self._rubber: Optional[QRubberBand] = None
         self._rubber_origin = QPointF()
@@ -78,11 +105,13 @@ class PageView(QGraphicsView):
         else:
             self.viewport().setCursor(Qt.CrossCursor)
 
-    def set_page(self, png_bytes: bytes, zoom: float, page_index: int, spans: list[TextSpan]):
+    def set_page(self, png_bytes: bytes, zoom: float, page_index: int,
+                 spans: list[TextSpan], blocks: list | None = None):
         self._cancel_inline_edit()
         self._zoom = zoom
         self._page_index = page_index
         self._spans = spans
+        self._blocks = blocks or []
         img = QImage.fromData(png_bytes, "PNG")
         pix = QPixmap.fromImage(img)
         self._scene.clear()
@@ -113,6 +142,23 @@ class PageView(QGraphicsView):
         return QRectF(x0 * self._zoom, y0 * self._zoom,
                       (x1 - x0) * self._zoom, (y1 - y0) * self._zoom)
 
+    def _bbox_scene_rect(self, bbox) -> QRectF:
+        x0, y0, x1, y1 = bbox
+        return QRectF(x0 * self._zoom, y0 * self._zoom,
+                      (x1 - x0) * self._zoom, (y1 - y0) * self._zoom)
+
+    def _block_at(self, scene_pt: QPointF):
+        x = scene_pt.x() / self._zoom
+        y = scene_pt.y() / self._zoom
+        best = None
+        for b in self._blocks:
+            x0, y0, x1, y1 = b.bbox
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                area = (x1 - x0) * (y1 - y0)
+                if best is None or area < best[1]:
+                    best = (b, area)
+        return best[0] if best else None
+
     # -- mouse -------------------------------------------------------------
 
     def mouseMoveEvent(self, event):
@@ -120,7 +166,8 @@ class PageView(QGraphicsView):
         if self._mode == Mode.SELECT:
             span = self._span_at(scene_pt)
             self._show_hover(span)
-        elif self._mode == Mode.OCR_REGION and self._rubber is not None:
+        elif self._mode in (Mode.OCR_REGION, Mode.TEXT_BOX) and self._rubber is not None \
+                and self._rubber.isVisible():
             rect = QRect(self._rubber_origin.toPoint(), event.position().toPoint()).normalized()
             self._rubber.setGeometry(rect)
         super().mouseMoveEvent(event)
@@ -132,13 +179,19 @@ class PageView(QGraphicsView):
 
         if self._mode == Mode.SELECT:
             span = self._span_at(scene_pt)
-            if span is not None:
+            block = self._block_at(scene_pt)
+            # Populate the properties panel for whatever was clicked.
+            self.selected.emit(span, block)
+            if block is not None and getattr(block, "line_count", 1) >= 2 and span is not None:
+                # Multi-line block -> edit the whole paragraph and reflow.
+                self._begin_block_edit(block)
+            elif span is not None:
                 self._begin_inline_edit(span)
             else:
                 self._cancel_inline_edit()
         elif self._mode == Mode.ADD_TEXT:
             self.addTextRequested.emit(scene_pt.x() / self._zoom, scene_pt.y() / self._zoom)
-        elif self._mode == Mode.OCR_REGION:
+        elif self._mode in (Mode.OCR_REGION, Mode.TEXT_BOX):
             self._rubber_origin = event.position()
             if self._rubber is None:
                 self._rubber = QRubberBand(QRubberBand.Rectangle, self.viewport())
@@ -147,7 +200,8 @@ class PageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._mode == Mode.OCR_REGION and self._rubber is not None and self._rubber.isVisible():
+        if self._mode in (Mode.OCR_REGION, Mode.TEXT_BOX) and self._rubber is not None \
+                and self._rubber.isVisible():
             geo = self._rubber.geometry()
             self._rubber.hide()
             p0 = self.mapToScene(geo.topLeft())
@@ -155,7 +209,10 @@ class PageView(QGraphicsView):
             rect_pts = (min(p0.x(), p1.x()) / self._zoom, min(p0.y(), p1.y()) / self._zoom,
                         max(p0.x(), p1.x()) / self._zoom, max(p0.y(), p1.y()) / self._zoom)
             if (rect_pts[2] - rect_pts[0]) > 3 and (rect_pts[3] - rect_pts[1]) > 3:
-                self.ocrRegionRequested.emit(rect_pts)
+                if self._mode == Mode.OCR_REGION:
+                    self.ocrRegionRequested.emit(rect_pts)
+                else:
+                    self.textBoxRequested.emit(rect_pts)
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
@@ -242,8 +299,54 @@ class PageView(QGraphicsView):
             self._editor.deleteLater()
             self._editor = None
         self._editing_span = None
+        if self._block_editor is not None:
+            self._block_editor.blockSignals(True)
+            self._block_editor.deleteLater()
+            self._block_editor = None
+        self._editing_block = None
+
+    # -- paragraph (multi-line block) editing ------------------------------
+
+    def _begin_block_edit(self, block):
+        self._cancel_inline_edit()
+        self._editing_block = block
+        rect = self._bbox_scene_rect(block.bbox)
+        view_tl = self.mapFromScene(rect.topLeft())
+        view_br = self.mapFromScene(rect.bottomRight())
+        geo = QRect(view_tl, view_br).normalized()
+        geo.adjust(-4, -4, 8, 40)  # room to grow downward as the paragraph reflows
+
+        editor = _ParagraphEdit(self.viewport())
+        editor.setPlainText(block.text)
+        editor.setGeometry(geo)
+        px = max(9, int(block.size * self._zoom * 0.85))
+        editor.setStyleSheet(
+            f"QPlainTextEdit {{ font-size: {px}px; padding: 2px 4px; "
+            f"border: 2px solid #f5a623; background: #fffdf3; color: #111; }}"
+        )
+        editor.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        editor.selectAll()
+        editor.committed.connect(self._commit_block_edit)
+        editor.cancelled.connect(self._cancel_inline_edit)
+        editor.show()
+        editor.setFocus()
+        self._block_editor = editor
+        self.spanActivated.emit(block)
+
+    def _commit_block_edit(self):
+        if self._block_editor is None or self._editing_block is None:
+            return
+        new_text = self._block_editor.toPlainText()
+        block = self._editing_block
+        self._block_editor.blockSignals(True)
+        self._block_editor.deleteLater()
+        self._block_editor = None
+        self._editing_block = None
+        if new_text != block.text:
+            self.commitBlockEdit.emit(block, new_text)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self._cancel_inline_edit()
+            return
         super().keyPressEvent(event)

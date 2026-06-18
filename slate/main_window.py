@@ -15,11 +15,14 @@ from PySide6.QtWidgets import (
 from . import __app_name__, __version__
 from . import font_manager as fm
 from . import ocr as ocr_mod
-from .pdf_document import PdfDocument, TextSpan
+from . import structure as struct
+from . import page_sizes as ps
+from .pdf_document import PdfDocument, TextSpan, _int_to_rgb
 from .text_editor import TextEditor, EditResult
 from .canvas import PageView, Mode
 from .pages_panel import PagesPanel
-from .dialogs import FontPromptDialog, AddTextDialog, OcrReviewDialog
+from .properties_panel import PropertiesPanel, Selection
+from .dialogs import FontPromptDialog, AddTextDialog, OcrReviewDialog, PageSizeDialog
 
 
 class MainWindow(QMainWindow):
@@ -34,13 +37,19 @@ class MainWindow(QMainWindow):
         self.editor = TextEditor(self.document)
         self.current_page = 0
         self.zoom = 1.5
+        self._blocks: list = []
+        self._sel_span: TextSpan | None = None
+        self._sel_block = None
 
         # Central page view
         self.view = PageView()
         self.setCentralWidget(self.view)
         self.view.commitEdit.connect(self._on_commit_edit)
+        self.view.commitBlockEdit.connect(self._on_commit_block_edit)
+        self.view.selected.connect(self._on_selection)
         self.view.spanActivated.connect(self._on_span_activated)
         self.view.addTextRequested.connect(self._on_add_text)
+        self.view.textBoxRequested.connect(self._on_text_box)
         self.view.ocrRegionRequested.connect(self._on_ocr_region)
         self.view.zoomRequested.connect(self._on_zoom_factor)
 
@@ -57,6 +66,15 @@ class MainWindow(QMainWindow):
         self.pages.splitAtRequested.connect(self._on_split_at)
         self.pages.rotateRequested.connect(self._on_rotate)
         self.pages.reordered.connect(self._on_reordered)
+
+        # Properties dock (right): manual font selection + structure type
+        self.props = PropertiesPanel()
+        pdock = QDockWidget("Properties", self)
+        pdock.setWidget(self.props)
+        pdock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.addDockWidget(Qt.RightDockWidgetArea, pdock)
+        self.props_dock = pdock
+        self.props.styleApplied.connect(self._on_style_applied)
 
         self._build_actions()
         self._build_toolbar()
@@ -80,8 +98,11 @@ class MainWindow(QMainWindow):
 
         self.act_mode_select = QAction("Edit Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
         self.act_mode_add = QAction("Add Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.ADD_TEXT))
+        self.act_mode_box = QAction("Text Box", self, checkable=True, triggered=lambda: self.set_mode(Mode.TEXT_BOX))
         self.act_mode_ocr = QAction("OCR Region", self, checkable=True, triggered=lambda: self.set_mode(Mode.OCR_REGION))
         self.act_mode_select.setChecked(True)
+
+        self.act_page_size = QAction("Page Size…", self, triggered=self.change_page_size)
 
         self.act_prev = QAction("◀", self, triggered=self.prev_page)
         self.act_next = QAction("▶", self, triggered=self.next_page)
@@ -100,7 +121,10 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         tb.addAction(self.act_mode_select)
         tb.addAction(self.act_mode_add)
+        tb.addAction(self.act_mode_box)
         tb.addAction(self.act_mode_ocr)
+        tb.addSeparator()
+        tb.addAction(self.act_page_size)
         tb.addSeparator()
         tb.addAction(self.act_prev)
         self.page_label = QLabel("  —  ")
@@ -126,13 +150,17 @@ class MainWindow(QMainWindow):
         m_file.addAction(self.act_quit)
 
         m_tools = bar.addMenu("Tools")
-        for a in (self.act_mode_select, self.act_mode_add, self.act_mode_ocr):
+        for a in (self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr):
             m_tools.addAction(a)
+
+        m_page = bar.addMenu("Page")
+        m_page.addAction(self.act_page_size)
 
         m_view = bar.addMenu("View")
         for a in (self.act_zoom_in, self.act_zoom_out, self.act_prev, self.act_next):
             m_view.addAction(a)
         m_view.addAction(self.pages_dock.toggleViewAction())
+        m_view.addAction(self.props_dock.toggleViewAction())
 
         m_help = bar.addMenu("Help")
         m_help.addAction(self.act_about)
@@ -157,7 +185,8 @@ class MainWindow(QMainWindow):
 
     def _set_open_state(self, is_open: bool):
         for a in (self.act_save, self.act_save_as, self.act_export,
-                  self.act_mode_select, self.act_mode_add, self.act_mode_ocr,
+                  self.act_mode_select, self.act_mode_add, self.act_mode_box, self.act_mode_ocr,
+                  self.act_page_size,
                   self.act_prev, self.act_next, self.act_zoom_in, self.act_zoom_out):
             a.setEnabled(is_open)
 
@@ -168,9 +197,11 @@ class MainWindow(QMainWindow):
         self.view.set_mode(mode)
         self.act_mode_select.setChecked(mode == Mode.SELECT)
         self.act_mode_add.setChecked(mode == Mode.ADD_TEXT)
+        self.act_mode_box.setChecked(mode == Mode.TEXT_BOX)
         self.act_mode_ocr.setChecked(mode == Mode.OCR_REGION)
-        names = {Mode.SELECT: "Edit Text — click any text to change it",
+        names = {Mode.SELECT: "Edit Text — click a line, or a paragraph to reflow it",
                  Mode.ADD_TEXT: "Add Text — click where you want new text",
+                 Mode.TEXT_BOX: "Text Box — drag a box, then type wrapping text",
                  Mode.OCR_REGION: "OCR Region — drag a box over non-editable text"}
         self.status(names[mode])
 
@@ -251,8 +282,14 @@ class MainWindow(QMainWindow):
         self.current_page = max(0, min(self.current_page, self.document.page_count - 1))
         png = self.document.render_page_png(self.current_page, self.zoom)
         spans = self.document.spans_on_page(self.current_page)
-        self.view.set_page(png, self.zoom, self.current_page, spans)
-        self.page_label.setText(f"  {self.current_page + 1} / {self.document.page_count}  ")
+        self._blocks = struct.analyze_page(self.document, self.current_page)
+        self.view.set_page(png, self.zoom, self.current_page, spans, self._blocks)
+        self.props.show_selection(None)
+        self._sel_span = self._sel_block = None
+        w, h = self.document.page_size(self.current_page)
+        std = ps.nearest_standard(w, h)
+        size_txt = f" · {std}" if std else f" · {w/ps.MM:.0f}×{h/ps.MM:.0f}mm"
+        self.page_label.setText(f"  {self.current_page + 1} / {self.document.page_count}{size_txt}  ")
         if not self.document.has_extractable_text(self.current_page):
             self.status("This page has no selectable text — use the OCR Region tool to edit it.")
 
@@ -277,9 +314,32 @@ class MainWindow(QMainWindow):
 
     # -- editing -----------------------------------------------------------
 
-    def _on_span_activated(self, span: TextSpan):
-        res = self.editor.resolve_font(span)
+    def _on_span_activated(self, obj):
+        # obj may be a TextSpan or a Block; both expose font_name + flags.
+        req = fm.parse_pdf_fontname(getattr(obj, "font_name", "Helvetica"),
+                                    getattr(obj, "flags", 0))
+        res = fm.resolve(req)
         self.font_status.setText("🅵 " + res.status_text)
+
+    def _on_selection(self, span, block):
+        """Populate the Properties panel from whatever was clicked."""
+        self._sel_span = span
+        self._sel_block = block
+        source = span if span is not None else block
+        if source is None:
+            self.props.show_selection(None)
+            return
+        req = fm.parse_pdf_fontname(source.font_name, source.flags)
+        installed = fm.index().find(req)
+        family = installed.family if installed else req.family
+        is_para = block is not None and getattr(block, "line_count", 1) >= 2
+        structure = block.type.value if block is not None else "Line"
+        align = getattr(block, "align", 0) if block is not None else 0
+        color = source.color_rgb if span is not None else _int_to_rgb(source.color)
+        self.props.show_selection(Selection(
+            family=family, size=source.size, bold=req.bold, italic=req.italic,
+            color=color, structure=structure, is_paragraph=is_para, align=align,
+        ))
 
     def _on_commit_edit(self, span: TextSpan, new_text: str):
         res = self.editor.resolve_font(span)
@@ -318,6 +378,81 @@ class MainWindow(QMainWindow):
         self.render_current_page()
         self._refresh_thumbnail(self.current_page)
         self._update_title()
+
+    def _on_commit_block_edit(self, block, new_text: str):
+        """A whole paragraph was edited — reflow it within its area."""
+        req = fm.parse_pdf_fontname(block.font_name, block.flags)
+        res = fm.resolve(req)
+        force_substitute = False
+        if not res.is_exact:
+            dlg = FontPromptDialog(res, self)
+            dlg.exec()
+            if dlg.choice == "cancel":
+                self.render_current_page()
+                return
+            if dlg.choice == "install":
+                self.status("Install the font, then click the paragraph again to edit it.")
+                self.render_current_page()
+                return
+            force_substitute = True
+        if force_substitute and res.substitute:
+            res = fm.FontResolution(res.request, None, res.substitute, None)
+        result = self.editor.replace_block_text(
+            block, new_text, res, size=block.size, color=_int_to_rgb(block.color), align=block.align)
+        self.status(result.message)
+        self.render_current_page()
+        self._refresh_thumbnail(block.page_index)
+        self._update_title()
+
+    def _on_text_box(self, rect_pts: tuple):
+        dlg = AddTextDialog(fm.index().families(), self)
+        dlg.setWindowTitle("Text box")
+        if dlg.exec() != dlg.Accepted:
+            return
+        text, family, size = dlg.values()
+        if not text.strip():
+            return
+        req = fm.parse_pdf_fontname(family)
+        result = self.editor.add_text_box(self.current_page, rect_pts, text, req, size=size)
+        self.status(result.message)
+        self.render_current_page()
+        self._refresh_thumbnail(self.current_page)
+        self._update_title()
+
+    def _on_style_applied(self, family, size, bold, italic, color, whole_paragraph, align):
+        """Properties-panel Apply: restyle the current selection with a chosen font."""
+        req = fm.FontRequest(family, family, bold, italic)
+        res = fm.resolve(req)
+        if whole_paragraph and self._sel_block is not None:
+            result = self.editor.replace_block_text(
+                self._sel_block, self._sel_block.text, res, size=size, color=color, align=align)
+        elif self._sel_span is not None:
+            span = self._sel_span
+            result = self.editor.replace_span_text(
+                span, span.text, res, size_override=size, color_override=color)
+        else:
+            self.status("Click some text first, then Apply.")
+            return
+        self.status("Applied: " + result.message)
+        self.render_current_page()
+        self._refresh_thumbnail(self.current_page)
+        self._update_title()
+
+    def change_page_size(self):
+        if not self.document.is_open:
+            return
+        w, h = self.document.page_size(self.current_page)
+        current = ps.nearest_standard(w, h)
+        dlg = PageSizeDialog(current, self.document.page_count, self)
+        if dlg.exec() != dlg.Accepted:
+            return
+        width, height, apply_all, scale = dlg.result_values()
+        indices = list(range(self.document.page_count)) if apply_all else [self.current_page]
+        self.document.set_page_size(indices, width, height, scale)
+        self._after_document_changed()
+        scope = f"all {len(indices)} pages" if apply_all else f"page {self.current_page + 1}"
+        mode = "scaled content" if scale else "kept content"
+        self.status(f"Resized {scope} to {width/ps.MM:.0f}×{height/ps.MM:.0f} mm ({mode}).")
 
     def _on_ocr_region(self, rect_pts: tuple):
         if not ocr_mod.tesseract_available():

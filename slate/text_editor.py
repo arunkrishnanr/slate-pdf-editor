@@ -111,8 +111,14 @@ class TextEditor:
         new_text: str,
         resolution: Optional[fm.FontResolution] = None,
         force_substitute: bool = False,
+        size_override: Optional[float] = None,
+        color_override: Optional[tuple[float, float, float]] = None,
     ) -> EditResult:
-        """Replace a span's text in place. Returns an EditResult describing what happened."""
+        """Replace a span's text in place. Returns an EditResult describing what happened.
+
+        `size_override`/`color_override` let the properties panel restyle a span (change
+        font, size or colour) while keeping it a true in-place edit.
+        """
         page = self.doc.doc[span.page_index]
         if resolution is None:
             resolution = self.resolve_font(span)
@@ -126,8 +132,8 @@ class TextEditor:
 
         # 2. Re-insert at the original baseline.
         point = fitz.Point(span.origin[0], span.origin[1])
-        color = span.color_rgb
-        fontsize = span.size
+        color = color_override if color_override is not None else span.color_rgb
+        fontsize = size_override if size_override is not None else span.size
 
         substituted = (not resolution.is_exact) or force_substitute
         font_file = None if force_substitute else resolution.file_for_embedding
@@ -192,3 +198,97 @@ class TextEditor:
             return EditResult(ok=False, message=f"Could not add text: {e}")
         self.doc.dirty = True
         return EditResult(ok=True, message="Text added.", resolution=resolution)
+
+    # ------------------------------------------------------------------
+    # Block / paragraph editing (reflow within the block's own area)
+    # ------------------------------------------------------------------
+
+    def replace_block_text(
+        self,
+        block,
+        new_text: str,
+        resolution: fm.FontResolution,
+        size: float,
+        color: tuple[float, float, float],
+        align: int = 0,
+    ) -> EditResult:
+        """Replace a whole paragraph/heading, re-wrapping the new text inside its region.
+
+        The text re-wraps within the block width and grows downward; if it overflows the
+        available space the font size is reduced until it fits (so nothing is lost).
+        """
+        page = self.doc.doc[block.page_index]
+        rect = fitz.Rect(block.bbox)
+
+        bg = _sample_background(page, rect)
+        page.add_redact_annot(rect, fill=bg)
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+        # Box can grow down to near the page bottom.
+        grow = fitz.Rect(rect.x0, rect.y0, rect.x1, page.rect.y1 - 12)
+        font_file = resolution.file_for_embedding
+        fontname = _fontname_for_file(font_file) if font_file else _builtin_for(resolution.request)
+
+        cur = size
+        rc = -1
+        for _ in range(24):  # shrink-to-fit
+            try:
+                if font_file:
+                    rc = page.insert_textbox(grow, new_text, fontfile=font_file,
+                                             fontname=fontname, fontsize=cur, color=color, align=align)
+                else:
+                    rc = page.insert_textbox(grow, new_text, fontname=_builtin_for(resolution.request),
+                                             fontsize=cur, color=color, align=align)
+            except Exception:
+                rc = -1
+            if rc >= 0:
+                break
+            cur = round(cur * 0.94, 2)
+            if cur < 4:
+                break
+
+        self.doc.dirty = True
+        if rc < 0:
+            return EditResult(ok=False, message="Paragraph too long to fit even at minimum size.",
+                              resolution=resolution)
+        note = "" if abs(cur - size) < 0.1 else f" (font scaled to {cur:.1f}pt to fit)"
+        return EditResult(ok=True, message=resolution.status_text + note, resolution=resolution,
+                          substituted=not resolution.is_exact)
+
+    def add_text_box(
+        self,
+        page_index: int,
+        rect_pts: tuple[float, float, float, float],
+        text: str,
+        font_request: fm.FontRequest,
+        size: float = 12.0,
+        color: tuple[float, float, float] = (0, 0, 0),
+        align: int = 0,
+    ) -> EditResult:
+        """Insert a wrapping text box within the given rectangle."""
+        page = self.doc.doc[page_index]
+        resolution = fm.resolve(font_request)
+        rect = fitz.Rect(rect_pts)
+        font_file = resolution.file_for_embedding
+        cur = size
+        rc = -1
+        for _ in range(24):
+            try:
+                if font_file:
+                    rc = page.insert_textbox(rect, text, fontfile=font_file,
+                                             fontname=_fontname_for_file(font_file),
+                                             fontsize=cur, color=color, align=align)
+                else:
+                    rc = page.insert_textbox(rect, text, fontname=_builtin_for(font_request),
+                                             fontsize=cur, color=color, align=align)
+            except Exception:
+                rc = -1
+            if rc >= 0:
+                break
+            cur = round(cur * 0.94, 2)
+            if cur < 4:
+                break
+        if rc < 0:
+            return EditResult(ok=False, message="Text doesn't fit in that box.")
+        self.doc.dirty = True
+        return EditResult(ok=True, message="Text box added.", resolution=resolution)

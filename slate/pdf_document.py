@@ -195,6 +195,36 @@ class PdfDocument:
         page.set_rotation((page.rotation + degrees) % 360)
         self.dirty = True
 
+    def set_page_size(self, indices: list[int], width: float, height: float,
+                      scale_content: bool):
+        """Resize pages to width×height points, keeping text live & editable.
+
+        We transform the page content via a `cm` matrix in the content stream (rather
+        than rasterizing), so text stays selectable and editable afterwards.
+          * scale_content=True  -> content scaled uniformly to fit and centred
+          * scale_content=False -> content kept at its size, anchored to the top
+        """
+        for i in indices:
+            page = self.doc[i]
+            old = page.rect
+            oldw, oldh = old.width, old.height
+            if oldw > 1 and oldh > 1:
+                s = min(width / oldw, height / oldh) if scale_content else 1.0
+                tx = (width - oldw * s) / 2 if scale_content else 0.0
+                ty = height - oldh * s  # PDF origin is bottom-left; anchor content to top
+                try:
+                    page.clean_contents()
+                    contents = page.get_contents()
+                    if contents:
+                        xref = contents[0]
+                        stream = self.doc.xref_stream(xref)
+                        prefix = ("q %.6f 0 0 %.6f %.6f %.6f cm\n" % (s, s, tx, ty)).encode()
+                        self.doc.update_stream(xref, prefix + stream + b"\nQ")
+                except Exception:
+                    pass
+            page.set_mediabox(fitz.Rect(0, 0, width, height))
+        self.dirty = True
+
     def split_off(self, indices: list[int], out_path: str):
         """Write the given pages into a brand-new PDF file (non-destructive)."""
         new = fitz.open()

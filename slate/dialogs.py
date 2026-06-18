@@ -11,9 +11,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QDialogButtonBox, QSpinBox, QComboBox, QPlainTextEdit, QFormLayout,
+    QRadioButton, QButtonGroup, QCheckBox,
 )
 
 from . import font_manager as fm
+from . import page_sizes as ps
 
 
 class FontPromptDialog(QDialog):
@@ -152,3 +154,86 @@ class OcrReviewDialog(QDialog):
 
     def text(self) -> str:
         return self.edit.toPlainText()
+
+
+class PageSizeDialog(QDialog):
+    """Choose a standard page size (or custom), orientation, scope and resize behaviour."""
+
+    def __init__(self, current_label: str | None, page_count: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Page size")
+        self.setMinimumWidth(420)
+        form = QFormLayout(self)
+
+        # Size picker, grouped by standard family.
+        self.size_combo = QComboBox()
+        for group_name, names in ps.PAGE_SIZE_GROUPS:
+            self.size_combo.addItem(f"— {group_name} —")
+            idx = self.size_combo.count() - 1
+            self.size_combo.model().item(idx).setEnabled(False)
+            for n in names:
+                self.size_combo.addItem(ps.size_label(n), n)
+        self.size_combo.addItem("Custom…", "__custom__")
+        if current_label:
+            i = self.size_combo.findData(current_label)
+            if i >= 0:
+                self.size_combo.setCurrentIndex(i)
+        form.addRow("Standard", self.size_combo)
+
+        # Custom dimensions (mm)
+        custom_row = QHBoxLayout()
+        self.cw = QSpinBox(); self.cw.setRange(10, 5000); self.cw.setValue(210); self.cw.setSuffix(" mm")
+        self.ch = QSpinBox(); self.ch.setRange(10, 5000); self.ch.setValue(297); self.ch.setSuffix(" mm")
+        custom_row.addWidget(QLabel("W")); custom_row.addWidget(self.cw)
+        custom_row.addWidget(QLabel("H")); custom_row.addWidget(self.ch)
+        form.addRow("Custom size", custom_row)
+
+        # Orientation
+        orient_row = QHBoxLayout()
+        self.portrait = QRadioButton("Portrait")
+        self.landscape = QRadioButton("Landscape")
+        self.portrait.setChecked(True)
+        og = QButtonGroup(self); og.addButton(self.portrait); og.addButton(self.landscape)
+        orient_row.addWidget(self.portrait); orient_row.addWidget(self.landscape); orient_row.addStretch(1)
+        form.addRow("Orientation", orient_row)
+
+        # Scope
+        scope_row = QHBoxLayout()
+        self.scope_current = QRadioButton("This page")
+        self.scope_all = QRadioButton(f"All {page_count} pages")
+        self.scope_current.setChecked(True)
+        sg = QButtonGroup(self); sg.addButton(self.scope_current); sg.addButton(self.scope_all)
+        scope_row.addWidget(self.scope_current); scope_row.addWidget(self.scope_all); scope_row.addStretch(1)
+        form.addRow("Apply to", scope_row)
+
+        # Content behaviour (offered every time, per the chosen design)
+        behav_row = QVBoxLayout()
+        self.scale_content = QRadioButton("Scale content to fit the new size")
+        self.keep_content = QRadioButton("Keep content as-is (change page dimensions only)")
+        self.scale_content.setChecked(True)
+        bg = QButtonGroup(self); bg.addButton(self.scale_content); bg.addButton(self.keep_content)
+        behav_row.addWidget(self.scale_content)
+        behav_row.addWidget(self.keep_content)
+        note = QLabel("Both keep text fully editable afterwards.")
+        note.setStyleSheet("color: #9aa0a8; font-size: 11px;")
+        behav_row.addWidget(note)
+        form.addRow("Content", behav_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def result_values(self):
+        """Return (width_pt, height_pt, apply_all, scale_content)."""
+        data = self.size_combo.currentData()
+        if data == "__custom__" or data is None:
+            w = self.cw.value() * ps.MM
+            h = self.ch.value() * ps.MM
+        else:
+            w, h = ps.PAGE_SIZES[data]
+        if self.landscape.isChecked():
+            w, h = max(w, h), min(w, h)
+        else:
+            w, h = min(w, h), max(w, h)
+        return w, h, self.scope_all.isChecked(), self.scale_content.isChecked()
