@@ -81,7 +81,7 @@ def icon_path() -> str:
 
 def main():
     QApplication.setApplicationName(__app_name__)
-    QApplication.setOrganizationName("Slate")
+    QApplication.setOrganizationName("Tirut")
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(DARK_QSS)

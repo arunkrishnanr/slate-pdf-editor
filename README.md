@@ -1,4 +1,4 @@
-# Slate PDF Editor
+# Tirut PDF
 
 A real desktop PDF editor — not a terminal tool — with **true in-place text editing**,
 font detection, page organization, and OCR for scanned documents. Built with
@@ -9,7 +9,7 @@ with its own application icon.
 
 ## What makes the text editing "true in-place"
 
-When you edit a line, Slate does **not** paint new text over the old text behind a white
+When you edit a line, Tirut PDF does **not** paint new text over the old text behind a white
 box. It:
 
 1. **Redacts** the original span — PyMuPDF's `apply_redactions` physically deletes the
@@ -43,11 +43,11 @@ This is the same mechanism real editors use: the actual content of the PDF chang
   background reconstructed with OpenCV inpainting**, then the corrected text is placed in
   the same spot — including over textured backgrounds.
 - **Edit text** — click any line; an edit box appears right over it. Enter commits, Esc cancels.
-- **Structure recognition** — Slate classifies each text block as **Title / Heading /
+- **Structure recognition** — Tirut PDF classifies each text block as **Title / Heading /
   Paragraph / Line**. Click a paragraph and the *whole* paragraph opens for editing and
   **re-wraps within its own region** (growing downward, shrinking to fit if needed); titles
   and single lines edit individually.
-- **Font detection** — Slate identifies the font behind the text you click. If it isn't
+- **Font detection** — Tirut PDF identifies the font behind the text you click. If it isn't
   installed it prompts you to **install** it (opens Font Book / Windows Fonts) and otherwise
   **substitutes** the closest match, telling you which.
 - **Manual font selection** — the **Properties** panel (right) shows the detected style and
@@ -70,7 +70,7 @@ This is the same mechanism real editors use: the actual content of the PDF chang
   or remove the password / owner restrictions from a document you've opened. *(No password cracking —
   files you can't open stay closed.)*
 - **Paragraph detection toggle** — turn whole-paragraph editing on/off (View menu).
-- **OCR fallback** — for non-editable / scanned pages, drag a box over the text. Slate runs
+- **OCR fallback** — for non-editable / scanned pages, drag a box over the text. Tirut PDF runs
   **Tesseract**, shows you the recognized text to correct, then removes the original and
   places your corrected line in the same spot.
 - **Organize pages** — thumbnail panel with **delete**, **drag-to-reorder**, **rotate**,
@@ -87,7 +87,7 @@ python tools/make_icon.py            # generate the app icon
 python run.py [optional.pdf]
 ```
 
-On launch Slate runs a **dependency preflight**: if an essential runtime tool (correct
+On launch Tirut PDF runs a **dependency preflight**: if an essential runtime tool (correct
 Python, PySide6, PyMuPDF, Pillow) is missing it shows an error with the official download
 link and exits. Tesseract (OCR) is optional — the app runs without it and points you to the
 download when you use OCR.
@@ -99,21 +99,21 @@ OCR needs the Tesseract engine on your PATH:
 
 ## Build a real installable app
 
-**macOS** → `dist/Slate PDF Editor.app`:
+**macOS** → `dist/Tirut PDF.app`:
 ```bash
 bash packaging/build_macos.sh
 # optional .dmg:
-hdiutil create -volname 'Slate PDF Editor' -srcfolder 'dist/Slate PDF Editor.app' -ov -format UDZO 'dist/Slate PDF Editor.dmg'
+hdiutil create -volname 'Tirut PDF' -srcfolder 'dist/Tirut PDF.app' -ov -format UDZO 'dist/Tirut PDF.dmg'
 ```
 
-**Windows** → `dist\Slate PDF Editor\`:
+**Windows** → `dist\Tirut PDF\`:
 ```bat
 packaging\build_windows.bat
 ```
 Wrap the output folder with Inno Setup or NSIS for a one-click installer.
 
 To ship OCR inside the bundle (so users don't install Tesseract), place a `tesseract`
-binary and its `tessdata` folder under `vendor/` before building; Slate auto-detects it.
+binary and its `tessdata` folder under `vendor/` before building; Tirut PDF auto-detects it.
 
 ## Project layout
 

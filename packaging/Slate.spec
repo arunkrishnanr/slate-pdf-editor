@@ -1,7 +1,7 @@
-# PyInstaller spec for Slate PDF Editor.
+# PyInstaller spec for Tirut PDF.
 #
-#   macOS    : pyinstaller packaging/Slate.spec  -> dist/Slate PDF Editor.app
-#   Windows  : pyinstaller packaging/Slate.spec  -> dist/Slate PDF Editor.exe   (single portable file)
+#   macOS    : pyinstaller packaging/Slate.spec  -> dist/Tirut PDF.app
+#   Windows  : pyinstaller packaging/Slate.spec  -> dist/Tirut PDF.exe   (single portable file)
 #
 # On Windows this produces a ONE-FILE, portable, no-install executable: double-click to run,
 # nothing to extract, no terminal window.
@@ -42,7 +42,7 @@ if IS_WIN:
     # --- Single-file portable .exe (everything embedded, self-extracts at runtime) ---
     exe = EXE(
         pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [],
-        name="Slate PDF Editor",
+        name="Tirut PDF",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -59,21 +59,21 @@ else:
     exe = EXE(
         pyz, a.scripts, [],
         exclude_binaries=True,
-        name="Slate PDF Editor",
+        name="Tirut PDF",
         debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
         console=False, disable_windowed_traceback=False, icon=icon,
     )
     coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas,
-                   strip=False, upx=False, name="Slate PDF Editor")
+                   strip=False, upx=False, name="Tirut PDF")
     if IS_MAC:
         app = BUNDLE(
             coll,
-            name="Slate PDF Editor.app",
+            name="Tirut PDF.app",
             icon=os.path.join(RES, "icon.icns"),
-            bundle_identifier="com.slate.pdfeditor",
+            bundle_identifier="com.tirut.pdf",
             info_plist={
-                "CFBundleName": "Slate PDF Editor",
-                "CFBundleDisplayName": "Slate PDF Editor",
+                "CFBundleName": "Tirut PDF",
+                "CFBundleDisplayName": "Tirut PDF",
                 "CFBundleShortVersionString": "1.0.0",
                 "CFBundleVersion": "1.0.0",
                 "NSHighResolutionCapable": True,

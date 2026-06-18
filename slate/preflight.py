@@ -1,7 +1,7 @@
 """
 Startup dependency preflight.
 
-Before the GUI loads, verify the runtime tools Slate needs are present. If a *hard*
+Before the GUI loads, verify the runtime tools Tirut PDF needs are present. If a *hard*
 requirement is missing, show a clear error (with official download links) and terminate.
 Optional tools (Tesseract OCR) are reported as soft notes — the app still runs without them.
 
@@ -16,7 +16,7 @@ import sys
 import shutil
 import platform
 
-APP_NAME = "Slate PDF Editor"
+APP_NAME = "Tirut PDF"
 MIN_PYTHON = (3, 9)
 
 # (import name, display name, install hint, official URL)

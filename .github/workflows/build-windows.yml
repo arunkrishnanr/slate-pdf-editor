@@ -1,6 +1,6 @@
 name: Build Windows portable exe
 
-# Builds the single-file portable Slate PDF Editor.exe on a Windows runner.
+# Builds the single-file portable Tirut PDF.exe on a Windows runner.
 # Trigger manually (Actions tab -> Run workflow) or on a version tag push.
 on:
   workflow_dispatch:
@@ -31,6 +31,6 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SlatePDFEditor-windows-portable
-          path: "dist/Slate PDF Editor.exe"
+          name: TirutPDF-windows-portable
+          path: "dist/Tirut PDF.exe"
           if-no-files-found: error

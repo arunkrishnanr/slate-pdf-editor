@@ -9,12 +9,12 @@ VSVersionInfo(
   kids=[
     StringFileInfo([
       StringTable('040904B0', [
-        StringStruct('CompanyName', 'Slate'),
-        StringStruct('FileDescription', 'Slate PDF Editor'),
+        StringStruct('CompanyName', 'Tirut'),
+        StringStruct('FileDescription', 'Tirut PDF'),
         StringStruct('FileVersion', '1.0.0'),
-        StringStruct('InternalName', 'Slate PDF Editor'),
-        StringStruct('OriginalFilename', 'Slate PDF Editor.exe'),
-        StringStruct('ProductName', 'Slate PDF Editor'),
+        StringStruct('InternalName', 'Tirut PDF'),
+        StringStruct('OriginalFilename', 'Tirut PDF.exe'),
+        StringStruct('ProductName', 'Tirut PDF'),
         StringStruct('ProductVersion', '1.0.0'),
       ])
     ]),

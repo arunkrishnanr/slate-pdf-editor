@@ -264,8 +264,8 @@ class PageSizeDialog(QDialog):
 
 
 HELP_HTML = """
-<h2>Slate PDF Editor — User Guide</h2>
-<p>Slate edits the <b>real content</b> of a PDF (original glyphs are removed and replaced),
+<h2>Tirut PDF — User Guide</h2>
+<p>Tirut PDF edits the <b>real content</b> of a PDF (original glyphs are removed and replaced),
 not a layer stamped on top.</p>
 
 <h3>Opening &amp; saving</h3>
@@ -277,7 +277,7 @@ or <b>Export Copy</b>.</li>
 
 <h3>Edit Mode vs View Only</h3>
 <ul>
-<li>Slate opens in <b>View Only</b> (read-only). Flip the <b>Edit Mode</b> switch in the
+<li>Tirut PDF opens in <b>View Only</b> (read-only). Flip the <b>Edit Mode</b> switch in the
 toolbar to make changes. Other switches: <b>Paragraphs</b>, <b>Tables</b>, <b>Properties</b>
 (show/hide the panel).</li>
 </ul>
@@ -310,7 +310,7 @@ and click <b>Apply</b> — to the line or the whole paragraph.</li>
 
 <h3>Fonts</h3>
 <ul>
-<li>Slate detects the font of the text you click. If it isn't installed, you're asked to
+<li>Tirut PDF detects the font of the text you click. If it isn't installed, you're asked to
 <b>install</b> it (opens Font Book / Windows Fonts) or to use the closest <b>substitute</b>.</li>
 <li>Pick any installed font manually from the Properties panel.</li>
 </ul>
@@ -323,7 +323,7 @@ and click <b>Apply</b> — to the line or the whole paragraph.</li>
 
 <h3>Scanned / non-editable text (OCR)</h3>
 <ul>
-<li><b>OCR Region</b>: drag a box over text that isn't selectable. Slate reads it with
+<li><b>OCR Region</b>: drag a box over text that isn't selectable. Tirut PDF reads it with
 Tesseract, lets you correct it, then removes the original and places your text in the
 same spot.</li>
 </ul>
@@ -545,7 +545,7 @@ class FindReplaceDialog(QDialog):
 class HelpDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Slate PDF Editor — Help")
+        self.setWindowTitle("Tirut PDF — Help")
         self.resize(620, 640)
         layout = QVBoxLayout(self)
         browser = QTextBrowser()

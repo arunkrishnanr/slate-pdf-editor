@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
         self.act_user_guide = QAction("User Guide", self, shortcut=QKeySequence.HelpContents,
                                       triggered=self.show_help)
         self.act_user_guide.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
-        self.act_about = QAction("About Slate PDF Editor", self, triggered=self.about)
+        self.act_about = QAction("About Tirut PDF", self, triggered=self.about)
         self.act_about.setMenuRole(QAction.MenuRole.AboutRole)  # -> app menu on macOS
         self.act_about_dev = QAction("About the Developer", self, triggered=self.about_developer)
         # Keep the developer credit in the Help menu (don't let macOS merge it with About).

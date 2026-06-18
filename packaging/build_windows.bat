@@ -1,8 +1,8 @@
 @echo off
 REM ===================================================================
-REM  Build a PORTABLE one-click Windows .exe for Slate PDF Editor.
+REM  Build a PORTABLE one-click Windows .exe for Tirut PDF.
 REM  Run this on a Windows PC (Python 3.10+ installed). Result:
-REM      dist\Slate PDF Editor.exe   <- single self-contained file
+REM      dist\Tirut PDF.exe   <- single self-contained file
 REM  No installer, no folder, no terminal window. Just double-click.
 REM ===================================================================
 setlocal
@@ -28,7 +28,7 @@ pyinstaller packaging\Slate.spec --noconfirm
 
 echo.
 echo ===================================================================
-echo  Done.  Portable program:  dist\Slate PDF Editor.exe
+echo  Done.  Portable program:  dist\Tirut PDF.exe
 echo  Copy that single file anywhere (USB stick, Desktop) and run it.
 echo ===================================================================
 echo.
