@@ -57,6 +57,49 @@ def _int_to_rgb(c: int) -> tuple[float, float, float]:
     return ((c >> 16) & 255) / 255.0, ((c >> 8) & 255) / 255.0, (c & 255) / 255.0
 
 
+def write_unlocked(doc: "fitz.Document", path: str):
+    """Write an unlocked (no encryption, no permission restrictions) copy of an *already
+    authenticated* document, and VERIFY the result.
+
+    MuPDF can very rarely glitch while decrypting content streams during save ("aes padding
+    out of range"), silently producing a page with no content. Since this feature's whole
+    job is unlocking, we never hand back a corrupted file: we verify page count + text, fall
+    back to rebuilding the document from scratch, and raise if neither yields a valid copy.
+    """
+    src_pages = doc.page_count
+    src_len = sum(len(doc[i].get_text("text")) for i in range(src_pages))  # also forces decrypt
+
+    def _valid(p: str) -> bool:
+        try:
+            c = fitz.open(p)
+            ok = (not c.needs_pass and c.page_count == src_pages and
+                  sum(len(c[i].get_text("text")) for i in range(c.page_count)) >= src_len * 0.6)
+            c.close()
+            return ok
+        except Exception:
+            return False
+
+    # 1) Direct re-save without encryption.
+    try:
+        doc.save(path, encryption=fitz.PDF_ENCRYPT_NONE, garbage=4, deflate=True)
+        if _valid(path):
+            return
+    except Exception:
+        pass
+    # 2) Rebuild into a fresh, unencrypted document (forces a full decrypt on copy).
+    try:
+        rebuilt = fitz.open()
+        rebuilt.insert_pdf(doc)
+        rebuilt.save(path, garbage=4, deflate=True)
+        rebuilt.close()
+        if _valid(path):
+            return
+    except Exception:
+        pass
+    raise RuntimeError("Couldn't produce a valid unlocked copy (decryption glitch). "
+                       "Please try again.")
+
+
 # ---------------------------------------------------------------------------
 # Document
 # ---------------------------------------------------------------------------
@@ -501,8 +544,8 @@ class PdfDocument:
                       permissions=perm, garbage=4, deflate=True)
 
     def save_decrypted(self, path: str):
-        """Write a copy with no encryption / no restrictions (requires the doc be open)."""
-        self.doc.save(path, encryption=fitz.PDF_ENCRYPT_NONE, garbage=4, deflate=True)
+        """Write a verified, fully-unlocked copy (no encryption / no restrictions)."""
+        write_unlocked(self.doc, path)
 
     def save(self, path: Optional[str] = None):
         target = path or self.path
