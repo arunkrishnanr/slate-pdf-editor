@@ -480,6 +480,14 @@ class PdfDocument:
     def is_encrypted(self) -> bool:
         return bool(self.doc and self.doc.is_encrypted)
 
+    @property
+    def is_locked(self) -> bool:
+        """True if the document is password-protected or has owner/permission restrictions.
+        (is_encrypted alone is unreliable — it goes False after an auto-decrypt.)"""
+        if not self.doc:
+            return False
+        return bool(self.doc.needs_pass) or bool((self.doc.metadata or {}).get("encryption"))
+
     def authenticate(self, password: str) -> bool:
         return bool(self.doc.authenticate(password))
 

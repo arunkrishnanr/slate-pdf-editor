@@ -324,7 +324,8 @@ class MainWindow(QMainWindow):
         self.act_export_images = QAction("Export Pages as Images…", self, triggered=self.export_images)
         self.act_export_text = QAction("Export Text…", self, triggered=self.export_text)
         self.act_encrypt = QAction("Set Password…", self, triggered=self.set_password)
-        self.act_remove_pw = QAction("Remove Password / Restrictions…", self, triggered=self.remove_password)
+        self.act_unlock = QAction("Unlock PDF…", self, triggered=self.unlock_pdf)  # iLovePDF-style
+        self.act_remove_pw = QAction("Remove Password (current document)…", self, triggered=self.remove_password)
 
         self.act_prev = QAction("◀", self, triggered=self.prev_page)
         self.act_next = QAction("▶", self, triggered=self.next_page)
@@ -448,6 +449,8 @@ class MainWindow(QMainWindow):
         m_export.addAction(self.act_export_images)
         m_export.addAction(self.act_export_text)
         m_security = m_file.addMenu("Security")
+        m_security.addAction(self.act_unlock)
+        m_security.addSeparator()
         m_security.addAction(self.act_encrypt)
         m_security.addAction(self.act_remove_pw)
         m_file.addSeparator()
@@ -1274,12 +1277,70 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Wrong password", "That password didn't work. Try again.")
         return False
 
+    def unlock_pdf(self):
+        """iLovePDF-style 'Unlock PDF': pick any locked PDF, supply its open password if
+        one is required, and save a copy with ALL encryption and permission restrictions
+        (printing / copying / editing) removed. Owner-only restricted files unlock without
+        a password; open-password files need the correct password (it can't crack one)."""
+        import fitz
+        path, _ = QFileDialog.getOpenFileName(self, "Select a locked PDF to unlock", "",
+                                              "PDF files (*.pdf)")
+        if not path:
+            return
+        try:
+            doc = fitz.open(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Could not open", str(e))
+            return
+        out = None
+        try:
+            if doc.needs_pass:
+                authed = False
+                for _ in range(3):
+                    pw, ok = QInputDialog.getText(
+                        self, "Password required",
+                        "This PDF needs a password to open.\nEnter it to unlock:",
+                        QLineEdit.Password)
+                    if not ok:
+                        return
+                    if doc.authenticate(pw):
+                        authed = True
+                        break
+                    QMessageBox.warning(self, "Wrong password", "That password didn't work. Try again.")
+                if not authed:
+                    QMessageBox.warning(
+                        self, "Unlock failed",
+                        "Couldn't unlock — the correct open password is required. "
+                        "Passwords can't be cracked.")
+                    return
+            # `is_encrypted` flips to False once auto-decrypted, so it can't tell us about
+            # owner-only restrictions — the encryption metadata is the reliable signal.
+            if not doc.needs_pass and not (doc.metadata or {}).get("encryption"):
+                QMessageBox.information(self, "Not locked",
+                                       "This PDF has no password or restrictions to remove.")
+                return
+            base = os.path.splitext(path)[0]
+            out, _ = QFileDialog.getSaveFileName(self, "Save unlocked PDF as",
+                                                 base + "_unlocked.pdf", "PDF files (*.pdf)")
+            if not out:
+                return
+            doc.save(out, encryption=fitz.PDF_ENCRYPT_NONE, garbage=4, deflate=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Unlock failed", str(e))
+            return
+        finally:
+            doc.close()
+        self.status(f"Unlocked → {os.path.basename(out)}")
+        if QMessageBox.question(self, "PDF unlocked",
+                                f"Saved unlocked copy:\n{out}\n\nOpen it now?") == QMessageBox.Yes:
+            self.open_path(out)
+
     def remove_password(self):
         """Remove encryption/owner-restrictions. Requires the document to already be open
         (i.e. you provided the password on open, or it was owner-restricted only)."""
         if not self.document.is_open:
             return
-        if not self.document.is_encrypted:
+        if not self.document.is_locked:
             QMessageBox.information(self, "Not protected", "This PDF has no password or restrictions.")
             return
         path, _ = QFileDialog.getSaveFileName(self, "Save unprotected copy as",
