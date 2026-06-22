@@ -28,8 +28,9 @@ from .properties_panel import PropertiesPanel, Selection
 from .widgets import SwitchButton
 from .dialogs import (
     FontPromptDialog, AddTextDialog, OcrReviewDialog, PageSizeDialog, HelpDialog,
-    FindReplaceDialog, DocumentSetupDialog,
+    FindReplaceDialog, DocumentSetupDialog, LicenseDialog,
 )
+from . import licensing
 
 DEVELOPER = "Aaron Krrish"
 
@@ -341,6 +342,8 @@ class MainWindow(QMainWindow):
         self.act_about_dev = QAction("About the Developer", self, triggered=self.about_developer)
         # Keep the developer credit in the Help menu (don't let macOS merge it with About).
         self.act_about_dev.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+        self.act_license = QAction("Activate License…", self, triggered=self.open_license_dialog)
+        self.act_license.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
 
     def _build_toolbar(self):
         tb = QToolBar("Main")
@@ -503,6 +506,8 @@ class MainWindow(QMainWindow):
         m_help = bar.addMenu("Help")
         m_help.addAction(self.act_user_guide)
         m_help.addSeparator()
+        m_help.addAction(self.act_license)
+        m_help.addSeparator()
         m_help.addAction(self.act_about)
         m_help.addAction(self.act_about_dev)
 
@@ -653,7 +658,12 @@ class MainWindow(QMainWindow):
         if not self.document.path:
             return self.save_file_as()
         try:
-            self.document.save()
+            if licensing.status().watermark:
+                self.document.save_watermarked(self.document.path)
+                self.document.dirty = False
+                self._note_free_save()
+            else:
+                self.document.save()
             self.status(f"Saved {os.path.basename(self.document.path)}")
             self._update_title()
             return True
@@ -669,7 +679,13 @@ class MainWindow(QMainWindow):
         if not path:
             return False
         try:
-            self.document.save(path)
+            if licensing.status().watermark:
+                self.document.save_watermarked(path)
+                self.document.path = path
+                self.document.dirty = False
+                self._note_free_save()
+            else:
+                self.document.save(path)
             self.status(f"Saved {os.path.basename(path)}")
             self._update_title()
             return True
@@ -684,7 +700,11 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            self.document.doc.save(path, garbage=4, deflate=True, clean=True)
+            if licensing.status().watermark:
+                self.document.save_watermarked(path)
+                self._note_free_save()
+            else:
+                self.document.doc.save(path, garbage=4, deflate=True, clean=True)
             self.status(f"Exported copy to {os.path.basename(path)}")
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
@@ -969,6 +989,8 @@ class MainWindow(QMainWindow):
             self._update_title()
 
     def _on_ocr_region(self, rect_pts: tuple):
+        if not self._require_pro("OCR text replacement"):
+            return
         self.status("Running OCR…")
         QApplication.processEvents()
         try:
@@ -1062,11 +1084,15 @@ class MainWindow(QMainWindow):
     def _update_title(self):
         t = self.tab()
         if t is None:
-            self.setWindowTitle(__app_name__)
+            st = licensing.status()
+            badge = "" if st.is_pro else f"  [{st.label}]"
+            self.setWindowTitle(f"{__app_name__}{badge}")
             return
         name = os.path.basename(t.document.path) if t.document.path else "Untitled"
         dirty = "•" if t.document.dirty else ""
-        self.setWindowTitle(f"{dirty}{name} — {__app_name__}")
+        st = licensing.status()
+        badge = "" if st.is_pro else f"  [{st.label}]"
+        self.setWindowTitle(f"{dirty}{name} — {__app_name__}{badge}")
         self._refresh_tab_title()
 
     def closeEvent(self, event):
@@ -1547,6 +1573,8 @@ class MainWindow(QMainWindow):
     def recognize_text(self, all_pages: bool):
         if self.tab() is None:
             return
+        if not self._require_pro("OCR (Recognize Text)"):
+            return
         pages = range(self.document.page_count) if all_pages else [self.current_page]
         self.status("Recognizing text…")
         QApplication.processEvents()
@@ -1601,6 +1629,37 @@ class MainWindow(QMainWindow):
     def show_help(self):
         HelpDialog(self).exec()
 
+    # -- licensing ---------------------------------------------------------
+
+    def open_license_dialog(self):
+        LicenseDialog(self).exec()
+        self._update_title()  # status (trial/Pro) may have changed
+
+    def _require_pro(self, feature: str) -> bool:
+        """True if Pro features are available (Pro or trial). Otherwise show an upsell
+        offering to activate, and return False."""
+        if licensing.status().unlocked:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Pro feature")
+        box.setText(f"{feature} is a Tirut PDF Pro feature.")
+        box.setInformativeText("Your free trial has ended. Activate a license to unlock OCR "
+                               "and watermark-free saves.")
+        act = box.addButton("Activate…", QMessageBox.AcceptRole)
+        box.addButton("Not now", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is act:
+            self.open_license_dialog()
+        return False
+
+    def _note_free_save(self):
+        """One-time-per-session heads-up that a free save carries a watermark."""
+        if getattr(self, "_free_save_noted", False):
+            return
+        self._free_save_noted = True
+        self.status("Saved with a Tirut watermark (unregistered). Activate a license to remove it.")
+
     def about(self):
         QMessageBox.about(
             self, "About " + __app_name__,
@@ -1608,6 +1667,7 @@ class MainWindow(QMainWindow):
             "<p>A desktop PDF editor with true in-place text editing, structure recognition, "
             "font detection &amp; selection, page organization, international page sizes, "
             "and OCR for scanned text.</p>"
+            f"<p>License: <b>{licensing.status().label}</b></p>"
             "<p>Built with PySide6 and PyMuPDF.</p>"
             f"<p>Developed by: <b>{DEVELOPER}</b></p>")
 

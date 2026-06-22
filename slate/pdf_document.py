@@ -526,6 +526,31 @@ class PdfDocument:
         self.path = target
         self.dirty = False
 
+    def save_watermarked(self, path: str, text: str = "Made with Tirut PDF — unregistered"):
+        """Write a copy with a small footer watermark on every page, leaving the in-memory
+        document clean (no watermark). Used for free/unregistered saves; Pro removes it.
+
+        Robust for in-place overwrite: we stamp the live doc, write to a TEMP file, then
+        restore the doc from a clean snapshot (which releases any OS handle on `path`) and
+        only then atomically replace `path`. That avoids the Windows 'file in use' / mmap
+        conflict you hit when a second document writes over a file you still have open."""
+        was_dirty = self.dirty
+        snap = self.snapshot()  # clean bytes, before watermarking
+        tmp = path + ".__wm_tmp.pdf"
+        try:
+            for page in self.doc:
+                r = page.rect
+                page.insert_textbox(
+                    fitz.Rect(0, r.height - 22, r.width, r.height - 6),
+                    text, fontname="helv", fontsize=8,
+                    color=(0.62, 0.62, 0.62), align=1)
+            self.doc.save(tmp, garbage=4, deflate=True, clean=True)
+        finally:
+            self.restore(snap)  # in-memory doc back to clean; drops the handle on `path`
+            self.dirty = was_dirty
+        os.replace(tmp, path)
+        # The working doc is clean and unchanged; we don't flip self.path here.
+
     def _reopen(self, path: str):
         self.doc.close()
         self.doc = fitz.open(path)
