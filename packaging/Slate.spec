@@ -1,10 +1,13 @@
 # PyInstaller spec for Tirut PDF.
 #
 #   macOS    : pyinstaller packaging/Slate.spec  -> dist/Tirut PDF.app
-#   Windows  : pyinstaller packaging/Slate.spec  -> dist/Tirut PDF.exe   (single portable file)
+#   Windows  : pyinstaller packaging/Slate.spec  -> dist/Tirut PDF/  (one-folder app)
 #
-# On Windows this produces a ONE-FILE, portable, no-install executable: double-click to run,
-# nothing to extract, no terminal window.
+# On Windows this produces a ONE-FOLDER app (Tirut PDF.exe + its DLLs in a folder).
+# This is the trusted, installer-friendly layout: Inno Setup packages the folder into
+# Program Files, and — unlike a one-file exe — it does NOT self-extract a Python runtime
+# to a temp dir at launch, which is the main trigger for SmartScreen / antivirus
+# false-positives. A portable build is just this folder, zipped (copy-and-run).
 import os
 import sys
 from PyInstaller.utils.hooks import collect_submodules
@@ -28,6 +31,8 @@ if os.path.isdir(vendor) and IS_WIN:
     datas.append((vendor, "vendor"))
 
 icon = os.path.join(RES, "icon.ico" if IS_WIN else "icon.icns")
+manifest = os.path.join(ROOT, "packaging", "tirut.manifest")
+win_version = os.path.join(ROOT, "packaging", "win_version_info.txt")
 
 a = Analysis(
     [os.path.join(ROOT, "run.py")],
@@ -44,21 +49,23 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 if IS_WIN:
-    # --- Single-file portable .exe (everything embedded, self-extracts at runtime) ---
+    # --- One-folder Windows app (trusted, installer-friendly; no runtime self-extract) ---
     exe = EXE(
-        pyz, a.scripts, a.binaries, a.zipfiles, a.datas, [],
+        pyz, a.scripts, [],
+        exclude_binaries=True,
         name="Tirut PDF",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
-        upx=False,
-        runtime_tmpdir=None,
+        upx=False,                      # UPX-packed exes are a common AV false-positive trigger
         console=False,                  # GUI app: no console window
         disable_windowed_traceback=False,
         icon=icon,
-        version=os.path.join(ROOT, "packaging", "win_version_info.txt")
-        if os.path.exists(os.path.join(ROOT, "packaging", "win_version_info.txt")) else None,
+        manifest=manifest if os.path.exists(manifest) else None,
+        version=win_version if os.path.exists(win_version) else None,
     )
+    coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas,
+                   strip=False, upx=False, name="Tirut PDF")
 else:
     # --- macOS one-folder + .app bundle ---
     exe = EXE(

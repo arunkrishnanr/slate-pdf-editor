@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize
@@ -358,6 +359,7 @@ class MainWindow(QMainWindow):
         self.sw_edit.toggled.connect(self._toggle_edit_mode)
         tb.addWidget(self.sw_edit)
         tb.addSeparator()
+        tb.addAction(self.act_mode_select)
         tb.addAction(self.act_mode_add)
         tb.addAction(self.act_mode_box)
         tb.addAction(self.act_mode_ocr)
@@ -864,12 +866,12 @@ class MainWindow(QMainWindow):
             return
         req = fm.parse_pdf_fontname(family)
         # y is the click point; nudge the baseline down by the font size.
-        self._snapshot()
-        result = self.editor.add_text(self.current_page, (x, y + size), text, req, size=size)
-        self.status(result.message)
-        self.render_current_page()
-        self._refresh_thumbnail(self.current_page)
-        self._update_title()
+        with self._mutation("Add text"):
+            result = self.editor.add_text(self.current_page, (x, y + size), text, req, size=size)
+            self.status(result.message)
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self._update_title()
 
     def _on_commit_block_edit(self, block, new_text: str):
         """A whole paragraph was edited — reflow it within its area."""
@@ -889,34 +891,34 @@ class MainWindow(QMainWindow):
             force_substitute = True
         if force_substitute and res.substitute:
             res = fm.FontResolution(res.request, None, res.substitute, None)
-        self._snapshot()
-        result = self.editor.replace_block_text(
-            block, new_text, res, size=block.size, color=_int_to_rgb(block.color), align=block.align)
-        self.status(result.message)
-        self.render_current_page()
-        self._refresh_thumbnail(block.page_index)
-        self._update_title()
+        with self._mutation("Edit"):
+            result = self.editor.replace_block_text(
+                block, new_text, res, size=block.size, color=_int_to_rgb(block.color), align=block.align)
+            self.status(result.message)
+            self.render_current_page()
+            self._refresh_thumbnail(block.page_index)
+            self._update_title()
 
     def _on_style_applied(self, family, size, bold, italic, color, whole_paragraph, align):
         """Properties-panel Apply: restyle the current selection with a chosen font."""
         req = fm.FontRequest(family, family, bold, italic)
         res = fm.resolve(req)
-        if whole_paragraph and self._sel_block is not None:
-            self._snapshot()
-            result = self.editor.replace_block_text(
-                self._sel_block, self._sel_block.text, res, size=size, color=color, align=align)
-        elif self._sel_span is not None:
-            self._snapshot()
-            span = self._sel_span
-            result = self.editor.replace_span_text(
-                span, span.text, res, size_override=size, color_override=color)
-        else:
+        use_block = whole_paragraph and self._sel_block is not None
+        if not use_block and self._sel_span is None:
             self.status("Click some text first, then Apply.")
             return
-        self.status("Applied: " + result.message)
-        self.render_current_page()
-        self._refresh_thumbnail(self.current_page)
-        self._update_title()
+        with self._mutation("Apply style"):
+            if use_block:
+                result = self.editor.replace_block_text(
+                    self._sel_block, self._sel_block.text, res, size=size, color=color, align=align)
+            else:
+                span = self._sel_span
+                result = self.editor.replace_span_text(
+                    span, span.text, res, size_override=size, color_override=color)
+            self.status("Applied: " + result.message)
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self._update_title()
 
     def document_setup(self):
         if not self.document.is_open:
@@ -927,15 +929,15 @@ class MainWindow(QMainWindow):
         dlg = DocumentSetupDialog(meta, current, self.document.page_count, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self._snapshot()
-        self.document.set_metadata(dlg.metadata())
-        pr = dlg.page_resize()
-        if pr:
-            width, height, apply_all, scale = pr
-            indices = list(range(self.document.page_count)) if apply_all else [self.current_page]
-            self.document.set_page_size(indices, width, height, scale)
-        self._after_document_changed()
-        self.status("Document setup applied." + (" Pages resized." if pr else ""))
+        with self._mutation("Document setup"):
+            self.document.set_metadata(dlg.metadata())
+            pr = dlg.page_resize()
+            if pr:
+                width, height, apply_all, scale = pr
+                indices = list(range(self.document.page_count)) if apply_all else [self.current_page]
+                self.document.set_page_size(indices, width, height, scale)
+            self._after_document_changed()
+            self.status("Document setup applied." + (" Pages resized." if pr else ""))
 
     def change_page_size(self):
         if not self.document.is_open:
@@ -947,24 +949,24 @@ class MainWindow(QMainWindow):
             return
         width, height, apply_all, scale = dlg.result_values()
         indices = list(range(self.document.page_count)) if apply_all else [self.current_page]
-        self._snapshot()
-        self.document.set_page_size(indices, width, height, scale)
-        self._after_document_changed()
-        scope = f"all {len(indices)} pages" if apply_all else f"page {self.current_page + 1}"
-        mode = "scaled content" if scale else "kept content"
-        self.status(f"Resized {scope} to {width/ps.MM:.0f}×{height/ps.MM:.0f} mm ({mode}).")
+        with self._mutation("Resize"):
+            self.document.set_page_size(indices, width, height, scale)
+            self._after_document_changed()
+            scope = f"all {len(indices)} pages" if apply_all else f"page {self.current_page + 1}"
+            mode = "scaled content" if scale else "kept content"
+            self.status(f"Resized {scope} to {width/ps.MM:.0f}×{height/ps.MM:.0f} mm ({mode}).")
 
     def _on_textbox_commit(self, rect_pts, text, size):
         """A live text box was typed on the canvas — place it as a wrapping text box."""
         if not text.strip():
             return
-        self._snapshot()
         req = fm.parse_pdf_fontname("Helvetica")
-        result = self.editor.add_text_box(self.current_page, rect_pts, text, req, size=size)
-        self.status(result.message)
-        self.render_current_page()
-        self._refresh_thumbnail(self.current_page)
-        self._update_title()
+        with self._mutation("Text box"):
+            result = self.editor.add_text_box(self.current_page, rect_pts, text, req, size=size)
+            self.status(result.message)
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self._update_title()
 
     def _on_ocr_region(self, rect_pts: tuple):
         self.status("Running OCR…")
@@ -993,13 +995,13 @@ class MainWindow(QMainWindow):
 
         # Remove the original scanned text + reconstruct the background, then place the
         # corrected text in the same spot.
-        self._snapshot()
-        result = self.editor.replace_region_inpaint(
-            self.current_page, rect_pts, corrected, size=median_size, color=(0, 0, 0))
-        self.status(f"OCR via {engine}. {result.message}")
-        self.render_current_page()
-        self._refresh_thumbnail(self.current_page)
-        self._update_title()
+        with self._mutation("OCR replace"):
+            result = self.editor.replace_region_inpaint(
+                self.current_page, rect_pts, corrected, size=median_size, color=(0, 0, 0))
+            self.status(f"OCR via {engine}. {result.message}")
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self._update_title()
 
     # -- page organization -------------------------------------------------
 
@@ -1012,12 +1014,12 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(self, "Delete pages",
                                 f"Delete {len(rows)} page(s)?") != QMessageBox.Yes:
             return
-        self._snapshot()
-        for i in sorted(rows, reverse=True):
-            self.document.delete_page(i)
-        self.current_page = min(self.current_page, self.document.page_count - 1)
-        self._after_document_changed()
-        self.status(f"Deleted {len(rows)} page(s).")
+        with self._mutation("Delete pages"):
+            for i in sorted(rows, reverse=True):
+                self.document.delete_page(i)
+            self.current_page = max(0, min(self.current_page, self.document.page_count - 1))
+            self._after_document_changed()
+            self.status(f"Deleted {len(rows)} page(s).")
 
     def _on_split_off(self, rows: list[int]):
         if not rows:
@@ -1039,19 +1041,21 @@ class MainWindow(QMainWindow):
         self.status(f"Split after page {after_index + 1} → part1.pdf, part2.pdf")
 
     def _on_rotate(self, rows: list[int], degrees: int):
-        self._snapshot()
-        for i in rows:
-            self.document.rotate_page(i, degrees)
-        self._after_document_changed()
-        self.status(f"Rotated {len(rows)} page(s) by {degrees}°.")
+        if not rows:
+            return
+        with self._mutation("Rotate"):
+            for i in rows:
+                self.document.rotate_page(i, degrees)
+            self._after_document_changed()
+            self.status(f"Rotated {len(rows)} page(s) by {degrees}°.")
 
     def _on_reordered(self, src: int, dst: int):
-        self._snapshot()
-        self.document.move_page(src, dst)
-        self.current_page = dst
-        self.pages.refresh(self.document, self.current_page)
-        self.render_current_page()
-        self.status(f"Moved page {src + 1} → position {dst + 1}.")
+        with self._mutation("Move page"):
+            self.document.move_page(src, dst)
+            self.current_page = max(0, min(dst, self.document.page_count - 1))
+            self.pages.refresh(self.document, self.current_page)
+            self.render_current_page()
+            self.status(f"Moved page {src + 1} → position {dst + 1}.")
 
     # -- misc --------------------------------------------------------------
 
@@ -1177,18 +1181,18 @@ class MainWindow(QMainWindow):
             text, ok = QInputDialog.getMultiLineText(self, "Sticky note", "Note text:")
             if not ok or not text.strip():
                 return
-            self._snapshot()
-            self.document.add_note(self.current_page, (x, y), text)
-            self.render_current_page()
-            self._refresh_thumbnail(self.current_page)
-            self.status("Note added.")
+            with self._mutation("Note"):
+                self.document.add_note(self.current_page, (x, y), text)
+                self.render_current_page()
+                self._refresh_thumbnail(self.current_page)
+                self.status("Note added.")
 
     def _on_ink(self, points):
-        self._snapshot()
-        self.document.add_ink(self.current_page, points)
-        self.render_current_page()
-        self._refresh_thumbnail(self.current_page)
-        self.status("Freehand drawing added.")
+        with self._mutation("Drawing"):
+            self.document.add_ink(self.current_page, points)
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self.status("Freehand drawing added.")
 
     # -- insert / duplicate ------------------------------------------------
 
@@ -1208,32 +1212,28 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Insert pages from PDF", "", "PDF files (*.pdf)")
         if not path:
             return
-        self._snapshot()
-        try:
+        with self._mutation("Insert"):
             n = self.document.insert_pdf(path, self.current_page)
-        except Exception as e:
-            QMessageBox.critical(self, "Insert failed", str(e))
-            return
-        self._after_document_changed()
-        self.status(f"Inserted {n} page(s) after page {self.current_page + 1}.")
+            self._after_document_changed()
+            self.status(f"Inserted {n} page(s) after page {self.current_page + 1}.")
 
     def insert_blank_page(self):
         if not self.document.is_open:
             return
         w, h = self.document.page_size(self.current_page)
-        self._snapshot()
-        self.document.insert_blank_page(self.current_page, w, h)
-        self.current_page += 1
-        self._after_document_changed()
-        self.status("Blank page inserted.")
+        with self._mutation("Insert blank page"):
+            self.document.insert_blank_page(self.current_page, w, h)
+            self.current_page += 1
+            self._after_document_changed()
+            self.status("Blank page inserted.")
 
     def duplicate_page(self):
         if not self.document.is_open:
             return
-        self._snapshot()
-        self.document.duplicate_page(self.current_page)
-        self._after_document_changed()
-        self.status("Page duplicated.")
+        with self._mutation("Duplicate page"):
+            self.document.duplicate_page(self.current_page)
+            self._after_document_changed()
+            self.status("Page duplicated.")
 
     # -- export ------------------------------------------------------------
 
@@ -1384,7 +1384,25 @@ class MainWindow(QMainWindow):
             self._redo_stack.clear()
         except Exception:
             pass
+        # Any mutation invalidates cached Find hits (pre-edit rects / page indices).
+        self._find_query = ""
+        self._find_hits = []
+        self._find_idx = -1
         self._update_undo_actions()
+
+    @contextmanager
+    def _mutation(self, label: str = "Edit"):
+        """Snapshot before a mutation; on failure drop the snapshot, warn, and
+        suppress the exception so the post-success body inside the `with` is skipped
+        and nothing propagates to the Qt event loop."""
+        self._snapshot()
+        try:
+            yield
+        except Exception as e:
+            if self._undo_stack:
+                self._undo_stack.pop()
+            self._update_undo_actions()
+            QMessageBox.warning(self, f"{label} failed", str(e))
 
     def _update_undo_actions(self):
         self.act_undo.setEnabled(bool(self._undo_stack))
@@ -1517,12 +1535,12 @@ class MainWindow(QMainWindow):
         if not grids:
             self.status("No table to apply. Turn on Tables over a page with a table.")
             return
-        self._snapshot()
-        self.document.draw_table_grids(self.current_page, grids)
-        self.render_current_page()
-        self._refresh_thumbnail(self.current_page)
-        self._update_title()
-        self.status("Table gridlines applied to the page.")
+        with self._mutation("Apply table"):
+            self.document.draw_table_grids(self.current_page, grids)
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self._update_title()
+            self.status("Table gridlines applied to the page.")
 
     # -- Acrobat-style Recognize Text (searchable layer) -------------------
 
