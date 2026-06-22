@@ -359,33 +359,6 @@ class PdfDocument:
         page.insert_image(fitz.Rect(rect_pts), filename=image_path)
         self.dirty = True
 
-    def extract_images(self, folder: str) -> int:
-        count = 0
-        for i in range(self.page_count):
-            for img in self.doc.get_page_images(i, full=True):
-                xref = img[0]
-                try:
-                    info = self.doc.extract_image(xref)
-                    ext = info.get("ext", "png")
-                    with open(os.path.join(folder, f"image_p{i+1:03d}_{xref}.{ext}"), "wb") as fh:
-                        fh.write(info["image"])
-                    count += 1
-                except Exception:
-                    continue
-        return count
-
-    def image_rects(self, page_index: int) -> list[fitz.Rect]:
-        """Bounding boxes of images on a page (for click-to-delete)."""
-        page = self.doc[page_index]
-        rects = []
-        for img in self.doc.get_page_images(page_index, full=True):
-            try:
-                for r in page.get_image_rects(img[0]):
-                    rects.append(r)
-            except Exception:
-                continue
-        return rects
-
     # -- redaction (true, permanent removal) ------------------------------
 
     def redact(self, page_index: int, rect_pts: tuple, fill=(0, 0, 0)):
@@ -422,17 +395,6 @@ class PdfDocument:
         annot.set_info(content=text)
         annot.update()
         self.dirty = True
-
-    def detect_tables(self, page_index: int) -> list[tuple]:
-        """Return bounding boxes of tables detected on a page (PyMuPDF find_tables)."""
-        out = []
-        try:
-            finder = self.doc[page_index].find_tables()
-            for t in finder.tables:
-                out.append(tuple(t.bbox))
-        except Exception:
-            pass
-        return out
 
     def detect_table_grids(self, page_index: int) -> list[dict]:
         """Return editable grid structures for tables: {bbox, cols:[x...], rows:[y...]}."""
