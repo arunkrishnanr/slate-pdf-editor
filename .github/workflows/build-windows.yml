@@ -50,10 +50,13 @@ jobs:
         run: |
           $app = "dist\Tirut PDF\Tirut PDF.exe"
           if (!(Test-Path $app)) { throw "Build did not produce $app" }
-          $tess = "dist\Tirut PDF\vendor\tesseract\bin\tesseract.exe"
-          if (!(Test-Path $tess)) { throw "Bundled Tesseract missing at $tess" }
-          & $tess --version
-          Write-Host "OK: one-folder app built with bundled Tesseract."
+          # PyInstaller 6.x onedir keeps everything but the exe under _internal\, so
+          # find the bundled tesseract.exe wherever it landed under the app folder.
+          $tess = Get-ChildItem -Path "dist\Tirut PDF" -Recurse -Filter tesseract.exe |
+                  Select-Object -First 1
+          if (-not $tess) { throw "Bundled Tesseract missing under dist\Tirut PDF" }
+          & $tess.FullName --version
+          Write-Host "OK: app at '$app'; tesseract at '$($tess.FullName)'"
 
       - name: Build installer (Inno Setup)
         shell: pwsh
