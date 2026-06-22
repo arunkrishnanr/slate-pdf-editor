@@ -655,15 +655,13 @@ class MainWindow(QMainWindow):
         """Returns True on success, False on failure/cancel (so callers can abort)."""
         if not self.document.is_open:
             return False
+        # Free/unregistered: never save in place — always a watermarked copy.
+        if licensing.status().watermark:
+            return self._save_watermarked_copy()
         if not self.document.path:
             return self.save_file_as()
         try:
-            if licensing.status().watermark:
-                self.document.save_watermarked(self.document.path)
-                self.document.dirty = False
-                self._note_free_save()
-            else:
-                self.document.save()
+            self.document.save()
             self.status(f"Saved {os.path.basename(self.document.path)}")
             self._update_title()
             return True
@@ -674,18 +672,14 @@ class MainWindow(QMainWindow):
     def save_file_as(self) -> bool:
         if not self.document.is_open:
             return False
+        if licensing.status().watermark:
+            return self._save_watermarked_copy()
         path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", self.document.path or "untitled.pdf",
                                               "PDF files (*.pdf)")
         if not path:
             return False
         try:
-            if licensing.status().watermark:
-                self.document.save_watermarked(path)
-                self.document.path = path
-                self.document.dirty = False
-                self._note_free_save()
-            else:
-                self.document.save(path)
+            self.document.save(path)
             self.status(f"Saved {os.path.basename(path)}")
             self._update_title()
             return True
@@ -693,14 +687,55 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save failed", str(e))
             return False
 
+    def _save_watermarked_copy(self) -> bool:
+        """Free-tier save: write a watermarked COPY to a new file. Never overwrites the
+        original, and won't let the user pick the currently-open file as the target."""
+        src = self.document.path
+        if src:
+            d, base = os.path.split(src)
+            stem, _ = os.path.splitext(base)
+            default = os.path.join(d, f"{stem} (Tirut unregistered).pdf")
+        else:
+            default = "untitled (Tirut unregistered).pdf"
+        while True:
+            path, _ = QFileDialog.getSaveFileName(self, "Save a watermarked copy", default,
+                                                  "PDF files (*.pdf)")
+            if not path:
+                return False
+            if src and os.path.abspath(path) == os.path.abspath(src):
+                QMessageBox.warning(
+                    self, "Choose a different file",
+                    "The free version saves a watermarked copy and can't overwrite your "
+                    "original.\nPick a different filename, or activate a license to save in place.")
+                continue
+            break
+        try:
+            self.document.save_watermarked(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", str(e))
+            return False
+        self._note_free_save()
+        self.status(f"Saved a watermarked copy: {os.path.basename(path)}")
+        return True
+
     def export_copy(self):
         if not self.document.is_open:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export a Copy", "copy.pdf", "PDF files (*.pdf)")
+        default = "copy.pdf"
+        if licensing.status().watermark and self.document.path:
+            stem, _ = os.path.splitext(os.path.basename(self.document.path))
+            default = f"{stem} (Tirut unregistered).pdf"
+        path, _ = QFileDialog.getSaveFileName(self, "Export a Copy", default, "PDF files (*.pdf)")
         if not path:
             return
         try:
             if licensing.status().watermark:
+                if self.document.path and os.path.abspath(path) == os.path.abspath(self.document.path):
+                    QMessageBox.warning(
+                        self, "Choose a different file",
+                        "The free version exports a watermarked copy and can't overwrite your "
+                        "original. Pick a different filename, or activate a license.")
+                    return
                 self.document.save_watermarked(path)
                 self._note_free_save()
             else:
