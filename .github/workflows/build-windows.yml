@@ -42,21 +42,31 @@ jobs:
       - name: Generate icon
         run: python tools/make_icon.py
 
-      - name: Build app (PyInstaller bundles vendor/ into the exe on Windows)
+      - name: Build app (one-folder; PyInstaller bundles vendor/ alongside the exe)
         run: pyinstaller packaging/Slate.spec --noconfirm
+
+      - name: Smoke-check the build (exe + bundled Tesseract present)
+        shell: pwsh
+        run: |
+          $app = "dist\Tirut PDF\Tirut PDF.exe"
+          if (!(Test-Path $app)) { throw "Build did not produce $app" }
+          $tess = "dist\Tirut PDF\vendor\tesseract\bin\tesseract.exe"
+          if (!(Test-Path $tess)) { throw "Bundled Tesseract missing at $tess" }
+          & $tess --version
+          Write-Host "OK: one-folder app built with bundled Tesseract."
 
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\windows_installer.iss
-        continue-on-error: true   # portable exe still ships even if installer step is unavailable
+        continue-on-error: true   # portable folder still ships even if the installer step is unavailable
 
-      - name: Upload portable exe
+      - name: Upload portable (the one-folder app, zipped — copy-and-run, no install)
         uses: actions/upload-artifact@v4
         with:
           name: TirutPDF-windows-portable
-          path: "dist/Tirut PDF.exe"
+          path: "dist/Tirut PDF/"
           if-no-files-found: error
 
       - name: Upload installer (if built)

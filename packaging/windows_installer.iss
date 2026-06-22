@@ -41,8 +41,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
 
 [Files]
-; The PyInstaller one-file exe already contains the bundled, self-contained Tesseract.
-Source: "dist\Tirut PDF.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The PyInstaller one-folder build: Tirut PDF.exe + its DLLs + the bundled,
+; self-contained Tesseract under vendor\. Package the whole folder into {app}.
+Source: "dist\Tirut PDF\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Tirut PDF"; Filename: "{app}\{#AppExeName}"

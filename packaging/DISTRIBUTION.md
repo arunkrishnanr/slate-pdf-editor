@@ -51,20 +51,45 @@ on a `windows-latest` runner:
 1. installs Python + deps,
 2. installs Tesseract via Chocolatey and copies it into `vendor/tesseract/` (bundled, not
    system-touching),
-3. builds `dist/Tirut PDF.exe` (one file, Tesseract inside),
-4. builds `dist/TirutPDF-Setup.exe` via Inno Setup.
+3. builds the **one-folder** app `dist/Tirut PDF/` (`Tirut PDF.exe` + its DLLs + bundled
+   Tesseract under `vendor/`),
+4. builds the installer `dist/TirutPDF-Setup.exe` via Inno Setup.
+
+Two artifacts are uploaded: **TirutPDF-windows-installer** (the Setup .exe) and
+**TirutPDF-windows-portable** (the app folder, zipped — copy-and-run, no install).
 
 Trigger it from the Actions tab → *Run workflow*, then download the artifacts.
 
-Then sign (needs **your** Windows code-signing certificate):
+### Why one-folder (this is the "trusted installer" part)
+
+The Windows build is **one-folder**, not a one-file exe, on purpose. A one-file PyInstaller
+exe unpacks an entire Python runtime to a temp directory on every launch — behaviour that
+Windows Defender / antivirus heuristics flag as dropper-like, the main cause of false
+positives. The one-folder app + an app manifest (`packaging/tirut.manifest`: `asInvoker`,
+per-monitor DPI, Win 7–11 compatibility) behaves like a normal program and minimises those
+flags. UPX compression is also disabled for the same reason.
+
+### The actual trust anchor: code signing (yours)
+
+Manifest + metadata reduce *antivirus* suspicion but do **not** silence SmartScreen's
+"Windows protected your PC / unknown publisher" prompt. Only a **code-signing certificate**
+does that:
+
+- **OV certificate** (~$200–400/yr): the warning clears once the signed app accrues download
+  *reputation* (can take days–weeks and some number of installs).
+- **EV certificate** (~$300–600/yr): instant SmartScreen trust, no reputation wait.
+
+Sign **both** the app exe and the installer, and sign the app exe **before** building the
+installer so it's covered inside:
 ```bat
-signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p PW "dist\Tirut PDF.exe"
+signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p PW "dist\Tirut PDF\Tirut PDF.exe"
+:: now build the installer (ISCC packaging\windows_installer.iss), then:
 signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p PW "dist\TirutPDF-Setup.exe"
 ```
-Prerequisites: an OV/EV code-signing certificate (an EV cert avoids SmartScreen warnings).
+(Or set Inno's `[Setup] SignTool=` directive to sign automatically during the build.)
 
 > Note: the Windows build is produced and validated on Windows/CI — it cannot be compiled
-> on macOS. The macOS package above is fully built and verified here.
+> on macOS. The macOS package is fully built and verified here.
 
 ## What I cannot do for you (account/credential-gated)
 
