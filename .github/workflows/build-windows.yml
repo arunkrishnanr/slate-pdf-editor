@@ -57,6 +57,12 @@ jobs:
           if (-not $tess) { throw "Bundled Tesseract missing under dist\Tirut PDF" }
           & $tess.FullName --version
           Write-Host "OK: app at '$app'; tesseract at '$($tess.FullName)'"
+          # Prove the packaged app actually loads its full import graph (PySide6, PyMuPDF,
+          # OpenCV, and cryptography's native binding) and that license verification works.
+          $p = Start-Process -FilePath $app -ArgumentList "--selftest" -PassThru -NoNewWindow
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw "Self-test timed out (app hung on import)" }
+          if ($p.ExitCode -ne 0) { throw "Self-test failed (exit $($p.ExitCode)) — a bundled module didn't load" }
+          Write-Host "OK: --selftest passed (full import graph + license crypto load)"
 
       - name: Build installer (Inno Setup)
         shell: pwsh
