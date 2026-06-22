@@ -16,6 +16,10 @@
 #define AppExeName "Tirut PDF.exe"
 
 [Setup]
+; Inno resolves relative paths (Source, OutputDir, SetupIconFile) against SourceDir,
+; which defaults to the .iss file's own folder (packaging\). Point it at the repo root
+; so "dist\…" and "slate\resources\…" resolve correctly regardless of the caller's CWD.
+SourceDir=..
 ; A stable, app-specific GUID. Keep this constant across versions so upgrades replace cleanly.
 AppId={{8F3B2C5A-1D4E-4A7B-9C21-A1B2C3D4E5F6}}
 AppName={#AppName}

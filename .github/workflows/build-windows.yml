@@ -72,9 +72,9 @@ jobs:
           path: "dist/Tirut PDF/"
           if-no-files-found: error
 
-      - name: Upload installer (if built)
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: TirutPDF-windows-installer
           path: "dist/TirutPDF-Setup.exe"
-          if-no-files-found: warn
+          if-no-files-found: error   # the installer is a required deliverable — fail loudly if missing
