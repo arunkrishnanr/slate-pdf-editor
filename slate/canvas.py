@@ -29,6 +29,7 @@ from .pdf_document import TextSpan
 class Mode(Enum):
     VIEW = auto()          # read-only: no editing interactions
     SELECT = auto()
+    MOVE = auto()          # drag text / images / shapes to reposition them
     ADD_TEXT = auto()
     TEXT_BOX = auto()
     OCR_REGION = auto()
@@ -83,6 +84,7 @@ class PageView(QGraphicsView):
     pointToolClicked = Signal(object, float, float)  # (Mode, x, y) for note
     inkFinished = Signal(list)              # list of (x, y) PDF points for freehand
     zoomRequested = Signal(float)           # zoom factor delta
+    moveFinished = Signal(object, float, float)  # (descriptor, dx_pts, dy_pts) for Move tool
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -121,6 +123,15 @@ class PageView(QGraphicsView):
         self._table_items: list = []
         self._dragging_divider = None   # (table_idx, 'col'|'row', divider_idx)
 
+        # Move tool state
+        self._movables: list = []       # [{kind:'image'|'annot', id, bbox}] non-text objects
+        self._snap = True               # snap to other objects' edges/centres
+        self._moving = None             # descriptor of the object being dragged
+        self._move_bbox = None          # original bbox (pts) of the dragged object
+        self._move_start = QPointF()    # scene-coord drag start
+        self._move_ghost = None         # ghost preview rect
+        self._snap_lines: list = []     # transient snap guide lines
+
         self.setMouseTracking(True)
 
     # -- public API --------------------------------------------------------
@@ -129,17 +140,43 @@ class PageView(QGraphicsView):
     def zoom(self) -> float:
         return self._zoom
 
+    # tool -> globally recognized OS cursor
+    _TOOL_CURSORS = {
+        Mode.VIEW: Qt.ArrowCursor,
+        Mode.SELECT: Qt.ArrowCursor,        # pick / edit
+        Mode.MOVE: Qt.SizeAllCursor,        # 4-way move
+        Mode.ADD_TEXT: Qt.IBeamCursor,      # text insertion
+        Mode.TEXT_BOX: Qt.IBeamCursor,
+        Mode.OCR_REGION: Qt.CrossCursor,    # drag a region
+        Mode.CROP: Qt.CrossCursor,
+        Mode.HIGHLIGHT: Qt.IBeamCursor,     # target text
+        Mode.UNDERLINE: Qt.IBeamCursor,
+        Mode.STRIKE: Qt.IBeamCursor,
+        Mode.NOTE: Qt.CrossCursor,
+        Mode.SHAPE_RECT: Qt.CrossCursor,
+        Mode.SHAPE_LINE: Qt.CrossCursor,
+        Mode.INK: Qt.CrossCursor,
+        Mode.REDACT: Qt.CrossCursor,
+        Mode.IMAGE: Qt.CrossCursor,
+    }
+
     def set_mode(self, mode: Mode):
         self._mode = mode
         self._dragging = False
         self._clear_preview()
+        self._clear_move()
         self._cancel_inline_edit()
-        if mode == Mode.SELECT:
-            self.viewport().setCursor(Qt.ArrowCursor)
-        elif mode in (Mode.ADD_TEXT, Mode.NOTE):
-            self.viewport().setCursor(Qt.IBeamCursor)
-        else:
-            self.viewport().setCursor(Qt.CrossCursor)
+        self.viewport().setCursor(self._cursor_for(mode))
+
+    def _cursor_for(self, mode: Mode):
+        return self._TOOL_CURSORS.get(mode, Qt.ArrowCursor)
+
+    def set_movable(self, objects: list):
+        """Non-text objects (images, annotations) the Move tool can grab/snap to."""
+        self._movables = list(objects or [])
+
+    def set_snap(self, on: bool):
+        self._snap = bool(on)
 
     def set_page(self, png_bytes: bytes, zoom: float, page_index: int,
                  spans: list[TextSpan], blocks: list | None = None):
@@ -159,6 +196,9 @@ class PageView(QGraphicsView):
         self._notes = []
         self._table_grids = []
         self._dragging_divider = None
+        self._moving = None
+        self._move_ghost = None
+        self._snap_lines = []
         self._pixmap_item = self._scene.addPixmap(pix)
         self._scene.setSceneRect(QRectF(pix.rect()))
 
@@ -326,6 +366,150 @@ class PageView(QGraphicsView):
                     best = (b, area)
         return best[0] if best else None
 
+    # -- move tool ---------------------------------------------------------
+
+    def _movable_at(self, scene_pt: QPointF):
+        """Topmost object the Move tool can grab at this point. Returns a descriptor dict:
+        annot/image (by xref) take priority over text; text is a paragraph block when
+        paragraph-detection has one, else the single line."""
+        x, y = scene_pt.x() / self._zoom, scene_pt.y() / self._zoom
+        # annotations first (drawn on top), then images
+        for kind in ("annot", "image"):
+            best = None
+            for o in self._movables:
+                if o["kind"] != kind:
+                    continue
+                x0, y0, x1, y1 = o["bbox"]
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    area = (x1 - x0) * (y1 - y0)
+                    if best is None or area < best[1]:
+                        best = (o, area)
+            if best:
+                o = best[0]
+                return {"kind": o["kind"], "id": o["id"], "bbox": o["bbox"],
+                        "page": self._page_index}
+        # text: paragraph block if detection found a multi-line one here, else the line
+        block = self._block_at(scene_pt)
+        span = self._span_at(scene_pt)
+        if self._para_detect and block is not None and getattr(block, "line_count", 1) >= 2:
+            return {"kind": "block", "bbox": tuple(block.bbox), "page": self._page_index}
+        if span is not None:
+            return {"kind": "span", "span": span, "bbox": tuple(span.bbox),
+                    "page": self._page_index}
+        return None
+
+    def _snap_edges(self, exclude_bbox):
+        """Collect candidate x- and y-edges (left/right/centre, top/bottom/middle) from all
+        other objects on the page — blocks, images, annots, and text lines."""
+        xs, ys = set(), set()
+        boxes = [tuple(b.bbox) for b in self._blocks]
+        boxes += [o["bbox"] for o in self._movables]
+        boxes += [s.bbox for s in self._spans]
+        for x0, y0, x1, y1 in boxes:
+            if exclude_bbox and abs(x0 - exclude_bbox[0]) < 0.1 and abs(y0 - exclude_bbox[1]) < 0.1 \
+                    and abs(x1 - exclude_bbox[2]) < 0.1 and abs(y1 - exclude_bbox[3]) < 0.1:
+                continue
+            xs.update((x0, x1, (x0 + x1) / 2))
+            ys.update((y0, y1, (y0 + y1) / 2))
+        return sorted(xs), sorted(ys)
+
+    def _snap_delta(self, dx, dy):
+        """Adjust a proposed (dx, dy) in points so the moving object's edges/centre snap to
+        nearby object edges. Returns (dx, dy, vline_x, hline_y) where the v/h lines (pts or
+        None) are guides to draw."""
+        bb = self._move_bbox
+        tol = 6.0 / max(self._zoom, 0.2)   # ~6 device px
+        xs, ys = self._snap_edges(bb)
+        mx = [bb[0] + dx, bb[2] + dx, (bb[0] + bb[2]) / 2 + dx]
+        my = [bb[1] + dy, bb[3] + dy, (bb[1] + bb[3]) / 2 + dy]
+        bestx = None
+        for me in mx:
+            for cx in xs:
+                d = cx - me
+                if abs(d) <= tol and (bestx is None or abs(d) < abs(bestx[0])):
+                    bestx = (d, cx)
+        besty = None
+        for me in my:
+            for cy in ys:
+                d = cy - me
+                if abs(d) <= tol and (besty is None or abs(d) < abs(besty[0])):
+                    besty = (d, cy)
+        vline = hline = None
+        if bestx is not None:
+            dx += bestx[0]; vline = bestx[1]
+        if besty is not None:
+            dy += besty[0]; hline = besty[1]
+        return dx, dy, vline, hline
+
+    def _begin_move(self, scene_pt):
+        desc = self._movable_at(scene_pt)
+        if desc is None:
+            return False
+        self._moving = desc
+        self._move_bbox = desc["bbox"]
+        self._move_start = scene_pt
+        self.viewport().setCursor(Qt.ClosedHandCursor)
+        ghost = QGraphicsRectItem(self._bbox_scene_rect(desc["bbox"]))
+        pen = QPen(QColor(0xFF, 0x84, 0x31), 1.6); pen.setStyle(Qt.DashLine)
+        ghost.setPen(pen)
+        ghost.setBrush(QBrush(QColor(0xFF, 0x84, 0x31, 40)))
+        ghost.setZValue(13)
+        self._scene.addItem(ghost)
+        self._move_ghost = ghost
+        return True
+
+    def _update_move(self, scene_pt, bypass_snap: bool):
+        if self._moving is None:
+            return
+        dx = (scene_pt.x() - self._move_start.x()) / self._zoom
+        dy = (scene_pt.y() - self._move_start.y()) / self._zoom
+        self._clear_snap_lines()
+        if self._snap and not bypass_snap:
+            dx, dy, vline, hline = self._snap_delta(dx, dy)
+            z = self._zoom
+            if vline is not None:
+                ln = self._scene.addLine(vline * z, 0, vline * z, self._scene.height(),
+                                         QPen(QColor(0x3a, 0xa0, 0xff), 0.8))
+                ln.setZValue(14); self._snap_lines.append(ln)
+            if hline is not None:
+                ln = self._scene.addLine(0, hline * z, self._scene.width(), hline * z,
+                                         QPen(QColor(0x3a, 0xa0, 0xff), 0.8))
+                ln.setZValue(14); self._snap_lines.append(ln)
+        self._move_delta = (dx, dy)
+        bb = self._move_bbox
+        self._move_ghost.setRect(QRectF((bb[0] + dx) * self._zoom, (bb[1] + dy) * self._zoom,
+                                        (bb[2] - bb[0]) * self._zoom, (bb[3] - bb[1]) * self._zoom))
+
+    def _finish_move(self):
+        if self._moving is None:
+            return
+        desc = self._moving
+        dx, dy = getattr(self, "_move_delta", (0.0, 0.0))
+        self._clear_move()
+        self.viewport().setCursor(self._cursor_for(Mode.MOVE))
+        if abs(dx) > 0.5 or abs(dy) > 0.5:
+            self.moveFinished.emit(desc, dx, dy)
+
+    def _clear_snap_lines(self):
+        for ln in self._snap_lines:
+            try:
+                self._scene.removeItem(ln)
+            except Exception:
+                pass
+        self._snap_lines = []
+
+    def _clear_move(self):
+        self._clear_snap_lines()
+        if self._move_ghost is not None:
+            try:
+                self._scene.removeItem(self._move_ghost)
+            except Exception:
+                pass
+        self._move_ghost = None
+        self._moving = None
+        self._move_bbox = None
+        self._move_delta = (0.0, 0.0)
+
     # -- mouse -------------------------------------------------------------
 
     def mouseMoveEvent(self, event):
@@ -345,7 +529,16 @@ class PageView(QGraphicsView):
         note = self._note_at(scene_pt) if self._notes else None
         if note:
             QToolTip.showText(event.globalPosition().toPoint(), note, self)
-        if self._mode == Mode.SELECT:
+        if self._mode == Mode.MOVE:
+            if self._moving is not None:
+                bypass = bool(event.modifiers() & (Qt.MetaModifier | Qt.ControlModifier))
+                self._update_move(scene_pt, bypass)
+            else:
+                # open hand over something grabbable, the move-tool cursor otherwise
+                grab = self._movable_at(scene_pt) is not None
+                self.viewport().setCursor(Qt.OpenHandCursor if grab
+                                          else self._cursor_for(Mode.MOVE))
+        elif self._mode == Mode.SELECT:
             span = self._span_at(scene_pt)
             self._show_hover(span)
         elif self._mode in RUBBER_MODES and self._dragging:
@@ -373,6 +566,9 @@ class PageView(QGraphicsView):
                 self._dragging_divider = d
                 return  # consume; don't start any other interaction
 
+        if self._mode == Mode.MOVE:
+            self._begin_move(scene_pt)
+            return  # consume; don't fall through to selection/rubber-band
         if self._mode == Mode.SELECT:
             span = self._span_at(scene_pt)
             block = self._block_at(scene_pt)
@@ -402,6 +598,9 @@ class PageView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         if self._dragging_divider is not None:
             self._dragging_divider = None
+            return super().mouseReleaseEvent(event)
+        if self._mode == Mode.MOVE and self._moving is not None:
+            self._finish_move()
             return super().mouseReleaseEvent(event)
         if self._mode in RUBBER_MODES and self._dragging:
             self._dragging = False

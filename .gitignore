@@ -17,6 +17,9 @@ slate/resources/icon.iconset/
 # Bundled OCR engine (drop your own tesseract here; not committed)
 vendor/
 
+# License signing SECRET — never commit. Anyone with this can forge license keys.
+tools/license_private_key.pem
+
 # Scratch
 sample.pdf
 *.log

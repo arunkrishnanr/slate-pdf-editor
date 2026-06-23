@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QAction, QKeySequence, QIcon, QImage, QPainter
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QImage, QPainter, QColor, QShortcut
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QDockWidget, QToolBar, QLabel,
@@ -28,8 +28,10 @@ from .properties_panel import PropertiesPanel, Selection
 from .widgets import SwitchButton
 from .dialogs import (
     FontPromptDialog, AddTextDialog, OcrReviewDialog, PageSizeDialog, HelpDialog,
-    FindReplaceDialog, DocumentSetupDialog,
+    FindReplaceDialog, DocumentSetupDialog, LicenseDialog,
 )
+from . import licensing
+from . import icons
 
 DEVELOPER = "Aaron Krrish"
 
@@ -77,6 +79,7 @@ class DocumentTab(QWidget):
         v.pointToolClicked.connect(main._on_point_tool)
         v.inkFinished.connect(main._on_ink)
         v.zoomRequested.connect(main._on_zoom_factor)
+        v.moveFinished.connect(main._on_move_finished)
 
 
 class MainWindow(QMainWindow):
@@ -139,6 +142,17 @@ class MainWindow(QMainWindow):
 
         # Point pytesseract at a bundled binary if present.
         self._configure_ocr()
+
+        # Full-screen presentation state + Esc-to-exit (enabled only while presenting).
+        self._presenting = False
+        self._esc_present = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self._esc_present.activated.connect(self.exit_presentation)
+        self._esc_present.setEnabled(False)
+        # Tool palette is for editing; hidden until Edit Mode is on.
+        self.tools_palette.setVisible(False)
+        # Table row/col/apply only make sense once Table detection is on.
+        for a in (self.act_table_add_row, self.act_table_add_col, self.act_table_apply):
+            a.setVisible(False)
 
     # -- tab proxying ------------------------------------------------------
     # Handlers were written against self.document / self.view / self.current_page etc.
@@ -297,10 +311,17 @@ class MainWindow(QMainWindow):
         self.act_recognize_all = QAction("Recognize Text — All Pages", self, triggered=lambda: self.recognize_text(True))
 
         self.act_mode_select = QAction("Select", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
+        self.act_mode_select.setToolTip("Select / Edit text — click a line or paragraph to edit it")
+        self.act_mode_move = QAction("Move", self, checkable=True, triggered=lambda: self.set_mode(Mode.MOVE))
+        self.act_mode_move.setToolTip("Move — drag text, images or shapes; edges snap (hold ⌘ to bypass)")
         self.act_mode_add = QAction("Add Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.ADD_TEXT))
         self.act_mode_box = QAction("Text Box", self, checkable=True, triggered=lambda: self.set_mode(Mode.TEXT_BOX))
         self.act_mode_ocr = QAction("OCR Region", self, checkable=True, triggered=lambda: self.set_mode(Mode.OCR_REGION))
         self.act_mode_select.setChecked(True)
+        # Snap toggle for the Move tool (on by default)
+        self.act_snap = QAction("Snap to objects", self, checkable=True)
+        self.act_snap.setChecked(True)
+        self.act_snap.toggled.connect(self._toggle_snap)
 
         self.act_page_size = QAction("Page Size…", self, triggered=self.change_page_size)
         self.act_crop = QAction("Crop Page", self, checkable=True, triggered=lambda: self.set_mode(Mode.CROP))
@@ -332,6 +353,9 @@ class MainWindow(QMainWindow):
         self.act_zoom_in = QAction("Zoom In", self, shortcut=QKeySequence.ZoomIn, triggered=lambda: self._on_zoom_factor(1.15))
         self.act_zoom_out = QAction("Zoom Out", self, shortcut=QKeySequence.ZoomOut, triggered=lambda: self._on_zoom_factor(1/1.15))
         self.act_fit_window = QAction("Fit to Window", self, triggered=self.zoom_fit_window)
+        self.act_present = QAction("Full Screen", self, triggered=self.enter_presentation)
+        self.act_present.setShortcut("Ctrl+Shift+F")
+        self.act_present.setToolTip("Full Screen — just the document on black (view only; Esc to exit)")
 
         self.act_user_guide = QAction("User Guide", self, shortcut=QKeySequence.HelpContents,
                                       triggered=self.show_help)
@@ -341,12 +365,38 @@ class MainWindow(QMainWindow):
         self.act_about_dev = QAction("About the Developer", self, triggered=self.about_developer)
         # Keep the developer credit in the Help menu (don't let macOS merge it with About).
         self.act_about_dev.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+        self.act_license = QAction("Activate License…", self, triggered=self.open_license_dialog)
+        self.act_license.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+
+    def _assign_icons(self):
+        """Give actions their minimal line icons (drawn in slate/icons.py)."""
+        mapping = {
+            "open": self.act_open, "save": self.act_save, "undo": self.act_undo,
+            "redo": self.act_redo, "find": self.act_find, "prev": self.act_prev,
+            "next": self.act_next, "pagesize": self.act_page_size,
+            "tablerow": self.act_table_add_row, "tablecol": self.act_table_add_col,
+            "tableapply": self.act_table_apply, "present": self.act_present,
+            "select": self.act_mode_select, "move": self.act_mode_move,
+            "snap": self.act_snap, "text": self.act_mode_add, "textbox": self.act_mode_box,
+            "ocr": self.act_mode_ocr, "crop": self.act_crop,
+            "highlight": self.act_mk_highlight, "underline": self.act_mk_underline,
+            "strike": self.act_mk_strike, "note": self.act_mk_note, "rect": self.act_mk_rect,
+            "line": self.act_mk_line, "ink": self.act_mk_ink, "redact": self.act_redact,
+            "image": self.act_insert_image,
+        }
+        for name, act in mapping.items():
+            act.setIcon(icons.icon(name))
 
     def _build_toolbar(self):
+        self._assign_icons()
+
+        # --- top bar: document + navigation (icon-only) ---
         tb = QToolBar("Main")
-        tb.setIconSize(QSize(18, 18))
+        tb.setIconSize(QSize(20, 20))
         tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.addToolBar(tb)
+        self.main_toolbar = tb
         tb.addAction(self.act_open)
         tb.addAction(self.act_save)
         tb.addSeparator()
@@ -358,11 +408,6 @@ class MainWindow(QMainWindow):
         self.sw_edit = SwitchButton("Edit Mode", checked=False)
         self.sw_edit.toggled.connect(self._toggle_edit_mode)
         tb.addWidget(self.sw_edit)
-        tb.addSeparator()
-        tb.addAction(self.act_mode_select)
-        tb.addAction(self.act_mode_add)
-        tb.addAction(self.act_mode_box)
-        tb.addAction(self.act_mode_ocr)
         tb.addSeparator()
         tb.addAction(self.act_page_size)
         tb.addSeparator()
@@ -381,6 +426,8 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_table_add_row)
         tb.addAction(self.act_table_add_col)
         tb.addAction(self.act_table_apply)
+        tb.addSeparator()
+        tb.addAction(self.act_present)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -389,6 +436,32 @@ class MainWindow(QMainWindow):
         self.font_status.setStyleSheet("color: #cfd3da; padding-right: 8px;")
         tb.addWidget(self.font_status)
 
+        # --- floating vertical tool palette (undockable; drag anywhere) ---
+        pal = QToolBar("Tools")
+        pal.setOrientation(Qt.Vertical)
+        pal.setMovable(True)
+        pal.setFloatable(True)
+        pal.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        pal.setIconSize(QSize(22, 22))
+        self.addToolBar(Qt.LeftToolBarArea, pal)
+        # Lean, logically grouped tool set. Occasional/destructive tools (OCR, Crop,
+        # Redact, Insert Image) live in their menus (Tools / Markup / Insert), not here.
+        for a in (self.act_mode_select, self.act_mode_move):          # select / manipulate
+            pal.addAction(a)
+        pal.addSeparator()
+        for a in (self.act_mode_add, self.act_mode_box):              # text
+            pal.addAction(a)
+        pal.addSeparator()
+        for a in (self.act_mk_highlight, self.act_mk_underline,       # markup
+                  self.act_mk_strike, self.act_mk_note):
+            pal.addAction(a)
+        pal.addSeparator()
+        for a in (self.act_mk_rect, self.act_mk_line, self.act_mk_ink):  # draw
+            pal.addAction(a)
+        pal.addSeparator()
+        pal.addAction(self.act_snap)                                  # Move option (not a tool)
+        self.tools_palette = pal
+
     ZOOM_PRESETS = [25, 50, 75, 100, 125, 150, 175, 200]
 
     def _build_zoom_bar(self):
@@ -396,6 +469,7 @@ class MainWindow(QMainWindow):
         bar = QToolBar("Zoom")
         bar.setMovable(False)
         self.addToolBar(Qt.BottomToolBarArea, bar)
+        self.zoom_bar = bar
 
         self.btn_zoom_minus = QToolButton()
         self.btn_zoom_minus.setText("−")
@@ -467,6 +541,9 @@ class MainWindow(QMainWindow):
         m_tools = bar.addMenu("Tools")
         m_tools.addAction(self.act_edit_mode)
         m_tools.addSeparator()
+        m_tools.addAction(self.act_mode_select)
+        m_tools.addAction(self.act_mode_move)
+        m_tools.addAction(self.act_snap)
         for a in (self.act_mode_add, self.act_mode_box, self.act_mode_ocr):
             m_tools.addAction(a)
         m_tools.addSeparator()
@@ -493,6 +570,9 @@ class MainWindow(QMainWindow):
         m_view.addSeparator()
         for a in (self.act_zoom_in, self.act_zoom_out, self.act_fit_window):
             m_view.addAction(a)
+        m_view.addAction(self.act_present)
+        m_view.addSeparator()
+        m_view.addAction(self.tools_palette.toggleViewAction())
         m_view.addSeparator()
         m_view.addAction(self.act_para_detect)
         m_view.addAction(self.act_table_detect)
@@ -502,6 +582,8 @@ class MainWindow(QMainWindow):
 
         m_help = bar.addMenu("Help")
         m_help.addAction(self.act_user_guide)
+        m_help.addSeparator()
+        m_help.addAction(self.act_license)
         m_help.addSeparator()
         m_help.addAction(self.act_about)
         m_help.addAction(self.act_about_dev)
@@ -561,6 +643,8 @@ class MainWindow(QMainWindow):
         if is_open and self._view_only:
             for a in self._editing_actions():
                 a.setEnabled(False)
+        # Full Screen: available whenever a document is open (both modes).
+        self.act_present.setEnabled(is_open)
 
     def status(self, msg: str, timeout: int = 0):
         self.statusBar().showMessage(msg, timeout)
@@ -570,7 +654,8 @@ class MainWindow(QMainWindow):
             return
         self.view.set_mode(mode)
         mode_actions = {
-            Mode.SELECT: self.act_mode_select, Mode.ADD_TEXT: self.act_mode_add,
+            Mode.SELECT: self.act_mode_select, Mode.MOVE: self.act_mode_move,
+            Mode.ADD_TEXT: self.act_mode_add,
             Mode.TEXT_BOX: self.act_mode_box, Mode.OCR_REGION: self.act_mode_ocr,
             Mode.CROP: self.act_crop, Mode.HIGHLIGHT: self.act_mk_highlight,
             Mode.UNDERLINE: self.act_mk_underline, Mode.STRIKE: self.act_mk_strike,
@@ -582,6 +667,7 @@ class MainWindow(QMainWindow):
             act.setChecked(m == mode)
         names = {
             Mode.SELECT: "Edit Text — click a line, or a paragraph to reflow it",
+            Mode.MOVE: "Move — drag text, images or shapes; edges snap (hold ⌘ to bypass)",
             Mode.ADD_TEXT: "Add Text — click where you want new text",
             Mode.TEXT_BOX: "Text Box — drag a box, then type wrapping text",
             Mode.OCR_REGION: "OCR Region — drag a box over non-editable text",
@@ -650,6 +736,9 @@ class MainWindow(QMainWindow):
         """Returns True on success, False on failure/cancel (so callers can abort)."""
         if not self.document.is_open:
             return False
+        # Free/unregistered: never save in place — always a watermarked copy.
+        if licensing.status().watermark:
+            return self._save_watermarked_copy()
         if not self.document.path:
             return self.save_file_as()
         try:
@@ -664,6 +753,8 @@ class MainWindow(QMainWindow):
     def save_file_as(self) -> bool:
         if not self.document.is_open:
             return False
+        if licensing.status().watermark:
+            return self._save_watermarked_copy()
         path, _ = QFileDialog.getSaveFileName(self, "Save PDF As", self.document.path or "untitled.pdf",
                                               "PDF files (*.pdf)")
         if not path:
@@ -677,14 +768,59 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save failed", str(e))
             return False
 
+    def _save_watermarked_copy(self) -> bool:
+        """Free-tier save: write a watermarked COPY to a new file. Never overwrites the
+        original, and won't let the user pick the currently-open file as the target."""
+        src = self.document.path
+        if src:
+            d, base = os.path.split(src)
+            stem, _ = os.path.splitext(base)
+            default = os.path.join(d, f"{stem} (Tirut unregistered).pdf")
+        else:
+            default = "untitled (Tirut unregistered).pdf"
+        while True:
+            path, _ = QFileDialog.getSaveFileName(self, "Save a watermarked copy", default,
+                                                  "PDF files (*.pdf)")
+            if not path:
+                return False
+            if src and os.path.abspath(path) == os.path.abspath(src):
+                QMessageBox.warning(
+                    self, "Choose a different file",
+                    "The free version saves a watermarked copy and can't overwrite your "
+                    "original.\nPick a different filename, or activate a license to save in place.")
+                continue
+            break
+        try:
+            self.document.save_watermarked(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", str(e))
+            return False
+        self._note_free_save()
+        self.status(f"Saved a watermarked copy: {os.path.basename(path)}")
+        return True
+
     def export_copy(self):
         if not self.document.is_open:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export a Copy", "copy.pdf", "PDF files (*.pdf)")
+        default = "copy.pdf"
+        if licensing.status().watermark and self.document.path:
+            stem, _ = os.path.splitext(os.path.basename(self.document.path))
+            default = f"{stem} (Tirut unregistered).pdf"
+        path, _ = QFileDialog.getSaveFileName(self, "Export a Copy", default, "PDF files (*.pdf)")
         if not path:
             return
         try:
-            self.document.doc.save(path, garbage=4, deflate=True, clean=True)
+            if licensing.status().watermark:
+                if self.document.path and os.path.abspath(path) == os.path.abspath(self.document.path):
+                    QMessageBox.warning(
+                        self, "Choose a different file",
+                        "The free version exports a watermarked copy and can't overwrite your "
+                        "original. Pick a different filename, or activate a license.")
+                    return
+                self.document.save_watermarked(path)
+                self._note_free_save()
+            else:
+                self.document.doc.save(path, garbage=4, deflate=True, clean=True)
             self.status(f"Exported copy to {os.path.basename(path)}")
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
@@ -713,6 +849,7 @@ class MainWindow(QMainWindow):
         notes = self.document.note_annotations(self.current_page)
         grids = self.document.detect_table_grids(self.current_page) if self._table_detect else []
         self.view.set_overlays(notes, grids)
+        self.view.set_movable(self.document.movable_objects(self.current_page))
         self.props.show_selection(None)
         self._sel_span = self._sel_block = None
         w, h = self.document.page_size(self.current_page)
@@ -969,6 +1106,8 @@ class MainWindow(QMainWindow):
             self._update_title()
 
     def _on_ocr_region(self, rect_pts: tuple):
+        if not self._require_pro("OCR text replacement"):
+            return
         self.status("Running OCR…")
         QApplication.processEvents()
         try:
@@ -1062,11 +1201,15 @@ class MainWindow(QMainWindow):
     def _update_title(self):
         t = self.tab()
         if t is None:
-            self.setWindowTitle(__app_name__)
+            st = licensing.status()
+            badge = "" if st.is_pro else f"  [{st.label}]"
+            self.setWindowTitle(f"{__app_name__}{badge}")
             return
         name = os.path.basename(t.document.path) if t.document.path else "Untitled"
         dirty = "•" if t.document.dirty else ""
-        self.setWindowTitle(f"{dirty}{name} — {__app_name__}")
+        st = licensing.status()
+        badge = "" if st.is_pro else f"  [{st.label}]"
+        self.setWindowTitle(f"{dirty}{name} — {__app_name__}{badge}")
         self._refresh_tab_title()
 
     def closeEvent(self, event):
@@ -1193,6 +1336,30 @@ class MainWindow(QMainWindow):
             self.render_current_page()
             self._refresh_thumbnail(self.current_page)
             self.status("Freehand drawing added.")
+
+    def _on_move_finished(self, desc, dx: float, dy: float):
+        """Commit a Move-tool drag: reposition the grabbed object by (dx, dy) points."""
+        kind = desc.get("kind")
+        page = desc.get("page", self.current_page)
+        with self._mutation("Move"):
+            if kind == "span":
+                self.editor.move_span(desc["span"], dx, dy)
+                label = "Text moved."
+            elif kind == "block":
+                n = self.editor.move_block(page, desc["bbox"], dx, dy)
+                label = f"Paragraph moved ({n} line{'s' if n != 1 else ''})."
+            elif kind == "image":
+                self.document.move_image(page, desc["id"], dx, dy)
+                label = "Image moved."
+            elif kind == "annot":
+                self.document.move_annot(page, desc["id"], dx, dy)
+                label = "Object moved."
+            else:
+                return
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self._update_title()
+            self.status(label)
 
     # -- insert / duplicate ------------------------------------------------
 
@@ -1547,6 +1714,8 @@ class MainWindow(QMainWindow):
     def recognize_text(self, all_pages: bool):
         if self.tab() is None:
             return
+        if not self._require_pro("OCR (Recognize Text)"):
+            return
         pages = range(self.document.page_count) if all_pages else [self.current_page]
         self.status("Recognizing text…")
         QApplication.processEvents()
@@ -1573,12 +1742,20 @@ class MainWindow(QMainWindow):
 
     def _editing_actions(self):
         return [
+            self.act_mode_move, self.act_snap,
             self.act_mode_add, self.act_mode_box, self.act_mode_ocr, self.act_crop,
             self.act_page_size, self.act_undo, self.act_redo,
             self.act_insert_image, self.act_insert_pdf, self.act_insert_blank, self.act_duplicate_page,
             self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike, self.act_mk_note,
             self.act_mk_rect, self.act_mk_line, self.act_mk_ink, self.act_redact,
         ]
+
+    def _toggle_snap(self, on: bool):
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, DocumentTab):
+                w.view.set_snap(on)
+        self.status(f"Snap {'on — edges align to other objects' if on else 'off — move freely'}.")
 
     def _toggle_edit_mode(self, on: bool):
         self._view_only = not on
@@ -1588,6 +1765,10 @@ class MainWindow(QMainWindow):
             a.setEnabled(on and self.document.is_open)
         if on:
             self._update_undo_actions()
+        # The vertical tool palette only makes sense while editing.
+        if hasattr(self, "tools_palette"):
+            self.tools_palette.setVisible(on and not getattr(self, "_presenting", False))
+        self.act_present.setEnabled(self.document.is_open)
         if self.tab() is not None:
             if on:
                 self.set_mode(Mode.SELECT)
@@ -1596,10 +1777,95 @@ class MainWindow(QMainWindow):
         self.status("Edit mode — full editing enabled." if on
                     else "View Only — read-only; turn on Edit Mode to make changes.")
 
+    # -- full-screen presentation -----------------------------------------
+
+    def enter_presentation(self):
+        """Maximise the document on a black background — no menus, toolbars, panels or
+        labels. Works in both View and Edit mode; while editing, the floating tool palette
+        stays so you can keep working. Esc exits."""
+        if getattr(self, "_presenting", False):
+            return
+        if not self.document.is_open:
+            return
+        self._presenting = True
+        keep_tools = not self._view_only  # editing -> keep the tools reachable
+        # remember what was visible so we can restore exactly
+        self._present_restore = {
+            "menu": self.menuBar().isVisible(),
+            "main_tb": self.main_toolbar.isVisible(),
+            "zoom": self.zoom_bar.isVisible(),
+            "pages": self.pages_dock.isVisible(),
+            "props": self.props_dock.isVisible(),
+            "status": self.statusBar().isVisible(),
+            "tabbar": self.tabs.tabBar().isVisible(),
+            "tools": self.tools_palette.isVisible(),
+        }
+        self.menuBar().setVisible(False)
+        self.main_toolbar.setVisible(False)
+        self.zoom_bar.setVisible(False)
+        self.pages_dock.setVisible(False)
+        self.props_dock.setVisible(False)
+        self.statusBar().setVisible(False)
+        self.tools_palette.setVisible(keep_tools)
+        self.tabs.tabBar().setVisible(False)
+        self.view.setBackgroundBrush(QColor(0, 0, 0))
+        self._esc_present.setEnabled(True)
+        self.showFullScreen()
+        self.zoom_fit_window()
+
+    def exit_presentation(self):
+        if not getattr(self, "_presenting", False):
+            return
+        self._presenting = False
+        self._esc_present.setEnabled(False)
+        r = getattr(self, "_present_restore", {})
+        self.showNormal()
+        self.menuBar().setVisible(r.get("menu", True))
+        self.main_toolbar.setVisible(r.get("main_tb", True))
+        self.zoom_bar.setVisible(r.get("zoom", True))
+        self.pages_dock.setVisible(r.get("pages", True))
+        self.props_dock.setVisible(r.get("props", True))
+        self.statusBar().setVisible(r.get("status", True))
+        self.tabs.tabBar().setVisible(r.get("tabbar", True))
+        self.tools_palette.setVisible(r.get("tools", False))
+        self.view.setBackgroundBrush(QColor(0x20, 0x20, 0x20))
+        self.zoom_fit_window()
+
     # -- help / about ------------------------------------------------------
 
     def show_help(self):
         HelpDialog(self).exec()
+
+    # -- licensing ---------------------------------------------------------
+
+    def open_license_dialog(self):
+        LicenseDialog(self).exec()
+        self._update_title()  # status (trial/Pro) may have changed
+
+    def _require_pro(self, feature: str) -> bool:
+        """True if Pro features are available (Pro or trial). Otherwise show an upsell
+        offering to activate, and return False."""
+        if licensing.status().unlocked:
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Pro feature")
+        box.setText(f"{feature} is a Tirut PDF Pro feature.")
+        box.setInformativeText("Your free trial has ended. Activate a license to unlock OCR "
+                               "and watermark-free saves.")
+        act = box.addButton("Activate…", QMessageBox.AcceptRole)
+        box.addButton("Not now", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is act:
+            self.open_license_dialog()
+        return False
+
+    def _note_free_save(self):
+        """One-time-per-session heads-up that a free save carries a watermark."""
+        if getattr(self, "_free_save_noted", False):
+            return
+        self._free_save_noted = True
+        self.status("Saved with a Tirut watermark (unregistered). Activate a license to remove it.")
 
     def about(self):
         QMessageBox.about(
@@ -1608,6 +1874,7 @@ class MainWindow(QMainWindow):
             "<p>A desktop PDF editor with true in-place text editing, structure recognition, "
             "font detection &amp; selection, page organization, international page sizes, "
             "and OCR for scanned text.</p>"
+            f"<p>License: <b>{licensing.status().label}</b></p>"
             "<p>Built with PySide6 and PyMuPDF.</p>"
             f"<p>Developed by: <b>{DEVELOPER}</b></p>")
 

@@ -7,15 +7,17 @@ import platform
 import subprocess
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QDialogButtonBox, QSpinBox, QComboBox, QPlainTextEdit, QFormLayout,
-    QRadioButton, QButtonGroup, QCheckBox, QTextBrowser, QGroupBox,
+    QRadioButton, QButtonGroup, QCheckBox, QTextBrowser, QGroupBox, QMessageBox,
 )
 
 from . import font_manager as fm
 from . import page_sizes as ps
+from . import licensing
 
 
 class FontPromptDialog(QDialog):
@@ -557,3 +559,105 @@ class HelpDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.button(QDialogButtonBox.Close).clicked.connect(self.accept)
         layout.addWidget(buttons)
+
+
+class LicenseDialog(QDialog):
+    """Activate a Pro license key, or see trial/license status and buy a license."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Tirut PDF — License")
+        self.setMinimumWidth(460)
+        self._layout = QVBoxLayout(self)
+        self._build()
+
+    def _build(self):
+        # clear any previous widgets (rebuild after activate/remove)
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        st = licensing.status()
+        title = QLabel(f"<h3>Status: {st.label}</h3>")
+        title.setTextFormat(Qt.RichText)
+        self._layout.addWidget(title)
+
+        if st.is_pro and st.license is not None:
+            lic = st.license
+            info = QLabel(
+                f"<p>Licensed to <b>{lic.email or lic.name or 'you'}</b><br>"
+                f"Edition: {lic.edition} &nbsp;•&nbsp; Seats: {lic.seats} &nbsp;•&nbsp; "
+                f"Expires: {lic.expires or 'never'}</p>"
+                "<p>Thank you — all Pro features are unlocked and saved files have no watermark.</p>")
+            info.setWordWrap(True)
+            info.setTextFormat(Qt.RichText)
+            self._layout.addWidget(info)
+
+            row = QHBoxLayout()
+            remove = QPushButton("Remove License")
+            remove.clicked.connect(self._remove)
+            row.addStretch(1)
+            row.addWidget(remove)
+            self._layout.addLayout(row)
+            close = QDialogButtonBox(QDialogButtonBox.Close)
+            close.rejected.connect(self.reject)
+            close.accepted.connect(self.accept)
+            close.button(QDialogButtonBox.Close).clicked.connect(self.accept)
+            self._layout.addWidget(close)
+            return
+
+        # trial / free → show activation + buy
+        if st.state == "trial":
+            msg = (f"You're on a free trial with full Pro features for "
+                   f"{st.trial_days_left} more day(s). Activate a license to keep OCR and "
+                   "watermark-free saves after it ends.")
+        else:
+            msg = ("Your trial has ended. Basic editing still works, but OCR is locked and "
+                   "saved files carry a small watermark. Activate a license to unlock Pro.")
+        note = QLabel(msg)
+        note.setWordWrap(True)
+        self._layout.addWidget(note)
+
+        self._layout.addWidget(QLabel("Paste your license key:"))
+        self.key_edit = QLineEdit()
+        self.key_edit.setPlaceholderText("TIRUT-…")
+        self.key_edit.returnPressed.connect(self._activate)
+        self._layout.addWidget(self.key_edit)
+
+        row = QHBoxLayout()
+        buy = QPushButton("Buy a License…")
+        buy.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(licensing.PURCHASE_URL)))
+        activate = QPushButton("Activate")
+        activate.setDefault(True)
+        activate.clicked.connect(self._activate)
+        row.addWidget(buy)
+        row.addStretch(1)
+        row.addWidget(activate)
+        self._layout.addLayout(row)
+
+        close = QDialogButtonBox(QDialogButtonBox.Close)
+        close.rejected.connect(self.reject)
+        close.accepted.connect(self.accept)
+        close.button(QDialogButtonBox.Close).clicked.connect(self.accept)
+        self._layout.addWidget(close)
+
+    def _activate(self):
+        key = self.key_edit.text().strip()
+        if not key:
+            return
+        try:
+            lic = licensing.activate(key)
+        except ValueError as e:
+            QMessageBox.warning(self, "Activation failed", str(e))
+            return
+        QMessageBox.information(self, "Activated",
+                                f"Thank you! Tirut PDF Pro is now active for {lic.email or 'you'}.")
+        self._build()  # refresh to the Pro view
+
+    def _remove(self):
+        if QMessageBox.question(self, "Remove license",
+                                "Remove the license from this device?") == QMessageBox.Yes:
+            licensing.deactivate()
+            self._build()

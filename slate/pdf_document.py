@@ -359,6 +359,56 @@ class PdfDocument:
         page.insert_image(fitz.Rect(rect_pts), filename=image_path)
         self.dirty = True
 
+    # -- movable objects (for the Move tool) ------------------------------
+
+    def movable_objects(self, page_index: int) -> list[dict]:
+        """Non-text things the Move tool can grab/snap to: images and annotations.
+        Each: {'kind': 'image'|'annot', 'id': xref, 'bbox': (x0,y0,x1,y1)}."""
+        page = self.doc[page_index]
+        out: list[dict] = []
+        try:
+            for info in page.get_image_info(xrefs=True):
+                xref = info.get("xref", 0)
+                bbox = info.get("bbox")
+                if xref and bbox:
+                    out.append({"kind": "image", "id": int(xref), "bbox": tuple(bbox)})
+        except Exception:
+            pass
+        try:
+            for a in (page.annots() or []):
+                out.append({"kind": "annot", "id": a.xref, "bbox": tuple(a.rect)})
+        except Exception:
+            pass
+        return out
+
+    def move_image(self, page_index: int, xref: int, dx: float, dy: float):
+        """Move an embedded image by (dx, dy) points: redact its current placement and
+        re-insert the same image bytes at the shifted rectangle."""
+        page = self.doc[page_index]
+        target = None
+        for info in page.get_image_info(xrefs=True):
+            if int(info.get("xref", 0)) == int(xref) and info.get("bbox"):
+                target = fitz.Rect(info["bbox"])
+                break
+        if target is None:
+            return
+        data = self.doc.extract_image(int(xref))
+        stream = data["image"]
+        page.add_redact_annot(target)
+        page.apply_redactions()  # remove the old placement (pixels in the rect)
+        page.insert_image(target + (dx, dy, dx, dy), stream=stream)
+        self.dirty = True
+
+    def move_annot(self, page_index: int, xref: int, dx: float, dy: float):
+        """Move an annotation/shape (highlight, shape, note, ink…) by (dx, dy) points."""
+        page = self.doc[page_index]
+        for a in (page.annots() or []):
+            if a.xref == xref:
+                a.set_rect(a.rect + (dx, dy, dx, dy))
+                a.update()
+                self.dirty = True
+                return
+
     # -- redaction (true, permanent removal) ------------------------------
 
     def redact(self, page_index: int, rect_pts: tuple, fill=(0, 0, 0)):
@@ -525,6 +575,30 @@ class PdfDocument:
             self.doc.save(target, garbage=4, deflate=True, clean=True)
         self.path = target
         self.dirty = False
+
+    def save_watermarked(self, path: str, text: str = "Made with Tirut PDF — unregistered"):
+        """Write a watermarked COPY to `path`, leaving the in-memory document untouched.
+
+        A watermarked (free/unregistered) save is ALWAYS a separate copy — it must never
+        overwrite the original. We build a fresh document from the current one, stamp a
+        small footer on each page, and save that; `self.doc`/`self.path`/`self.dirty` are
+        not modified. Pro saves (no watermark) remove this entirely."""
+        if self.path and os.path.abspath(path) == os.path.abspath(self.path):
+            raise ValueError("A watermarked copy can't overwrite the original file. "
+                             "Choose a different name, or activate a license to save in place.")
+        out = fitz.open()
+        out.insert_pdf(self.doc)
+        try:
+            for page in out:
+                r = page.rect
+                # faint, small, bottom-centred — visible but not destructive of content
+                page.insert_textbox(
+                    fitz.Rect(0, r.height - 22, r.width, r.height - 6),
+                    text, fontname="helv", fontsize=8,
+                    color=(0.62, 0.62, 0.62), align=1)
+            out.save(path, garbage=4, deflate=True, clean=True)
+        finally:
+            out.close()
 
     def _reopen(self, path: str):
         self.doc.close()
