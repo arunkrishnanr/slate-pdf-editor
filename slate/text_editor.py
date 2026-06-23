@@ -141,11 +141,13 @@ class TextEditor:
         force_substitute: bool = False,
         size_override: Optional[float] = None,
         color_override: Optional[tuple[float, float, float]] = None,
+        origin_override: Optional[tuple[float, float]] = None,
     ) -> EditResult:
         """Replace a span's text in place. Returns an EditResult describing what happened.
 
         `size_override`/`color_override` let the properties panel restyle a span (change
-        font, size or colour) while keeping it a true in-place edit.
+        font, size or colour) while keeping it a true in-place edit. `origin_override`
+        re-inserts the text at a new baseline (used by the Move tool to reposition text).
         """
         page = self.doc.doc[span.page_index]
         if resolution is None:
@@ -158,8 +160,9 @@ class TextEditor:
         # cross_out=False so we don't draw the strike line; we only want removal.
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
-        # 2. Re-insert at the original baseline.
-        point = fitz.Point(span.origin[0], span.origin[1])
+        # 2. Re-insert at the original baseline (or a moved one).
+        ox, oy = origin_override if origin_override is not None else span.origin
+        point = fitz.Point(ox, oy)
         color = color_override if color_override is not None else span.color_rgb
         fontsize = size_override if size_override is not None else span.size
 
@@ -201,6 +204,27 @@ class TextEditor:
             msg = (f"'{resolution.request.display}' is not installed and could not be "
                    f"matched; used a built-in fallback font.")
         return EditResult(ok=True, message=msg, resolution=resolution, substituted=substituted)
+
+    def move_span(self, span: TextSpan, dx: float, dy: float) -> EditResult:
+        """Reposition a single text line by (dx, dy) points: remove the original glyphs
+        and re-insert the same text at the shifted baseline, preserving font/size/colour."""
+        return self.replace_span_text(
+            span, span.text,
+            origin_override=(span.origin[0] + dx, span.origin[1] + dy))
+
+    def move_block(self, page_index: int, bbox: tuple, dx: float, dy: float) -> int:
+        """Reposition a whole paragraph by (dx, dy): move every text line whose centre
+        falls inside `bbox`. Returns the number of lines moved."""
+        x0, y0, x1, y1 = bbox
+        targets = []
+        for s in self.doc.spans_on_page(page_index):
+            cx = (s.bbox[0] + s.bbox[2]) / 2
+            cy = (s.bbox[1] + s.bbox[3]) / 2
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                targets.append(s)
+        for s in targets:
+            self.move_span(s, dx, dy)
+        return len(targets)
 
     def add_text(
         self,

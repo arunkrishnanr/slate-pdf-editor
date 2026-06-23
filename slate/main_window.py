@@ -78,6 +78,7 @@ class DocumentTab(QWidget):
         v.pointToolClicked.connect(main._on_point_tool)
         v.inkFinished.connect(main._on_ink)
         v.zoomRequested.connect(main._on_zoom_factor)
+        v.moveFinished.connect(main._on_move_finished)
 
 
 class MainWindow(QMainWindow):
@@ -298,10 +299,15 @@ class MainWindow(QMainWindow):
         self.act_recognize_all = QAction("Recognize Text — All Pages", self, triggered=lambda: self.recognize_text(True))
 
         self.act_mode_select = QAction("Select", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
+        self.act_mode_move = QAction("Move", self, checkable=True, triggered=lambda: self.set_mode(Mode.MOVE))
         self.act_mode_add = QAction("Add Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.ADD_TEXT))
         self.act_mode_box = QAction("Text Box", self, checkable=True, triggered=lambda: self.set_mode(Mode.TEXT_BOX))
         self.act_mode_ocr = QAction("OCR Region", self, checkable=True, triggered=lambda: self.set_mode(Mode.OCR_REGION))
         self.act_mode_select.setChecked(True)
+        # Snap toggle for the Move tool (on by default)
+        self.act_snap = QAction("Snap to objects", self, checkable=True)
+        self.act_snap.setChecked(True)
+        self.act_snap.toggled.connect(self._toggle_snap)
 
         self.act_page_size = QAction("Page Size…", self, triggered=self.change_page_size)
         self.act_crop = QAction("Crop Page", self, checkable=True, triggered=lambda: self.set_mode(Mode.CROP))
@@ -363,6 +369,8 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.sw_edit)
         tb.addSeparator()
         tb.addAction(self.act_mode_select)
+        tb.addAction(self.act_mode_move)
+        tb.addAction(self.act_snap)
         tb.addAction(self.act_mode_add)
         tb.addAction(self.act_mode_box)
         tb.addAction(self.act_mode_ocr)
@@ -470,6 +478,9 @@ class MainWindow(QMainWindow):
         m_tools = bar.addMenu("Tools")
         m_tools.addAction(self.act_edit_mode)
         m_tools.addSeparator()
+        m_tools.addAction(self.act_mode_select)
+        m_tools.addAction(self.act_mode_move)
+        m_tools.addAction(self.act_snap)
         for a in (self.act_mode_add, self.act_mode_box, self.act_mode_ocr):
             m_tools.addAction(a)
         m_tools.addSeparator()
@@ -575,7 +586,8 @@ class MainWindow(QMainWindow):
             return
         self.view.set_mode(mode)
         mode_actions = {
-            Mode.SELECT: self.act_mode_select, Mode.ADD_TEXT: self.act_mode_add,
+            Mode.SELECT: self.act_mode_select, Mode.MOVE: self.act_mode_move,
+            Mode.ADD_TEXT: self.act_mode_add,
             Mode.TEXT_BOX: self.act_mode_box, Mode.OCR_REGION: self.act_mode_ocr,
             Mode.CROP: self.act_crop, Mode.HIGHLIGHT: self.act_mk_highlight,
             Mode.UNDERLINE: self.act_mk_underline, Mode.STRIKE: self.act_mk_strike,
@@ -587,6 +599,7 @@ class MainWindow(QMainWindow):
             act.setChecked(m == mode)
         names = {
             Mode.SELECT: "Edit Text — click a line, or a paragraph to reflow it",
+            Mode.MOVE: "Move — drag text, images or shapes; edges snap (hold ⌘ to bypass)",
             Mode.ADD_TEXT: "Add Text — click where you want new text",
             Mode.TEXT_BOX: "Text Box — drag a box, then type wrapping text",
             Mode.OCR_REGION: "OCR Region — drag a box over non-editable text",
@@ -768,6 +781,7 @@ class MainWindow(QMainWindow):
         notes = self.document.note_annotations(self.current_page)
         grids = self.document.detect_table_grids(self.current_page) if self._table_detect else []
         self.view.set_overlays(notes, grids)
+        self.view.set_movable(self.document.movable_objects(self.current_page))
         self.props.show_selection(None)
         self._sel_span = self._sel_block = None
         w, h = self.document.page_size(self.current_page)
@@ -1255,6 +1269,30 @@ class MainWindow(QMainWindow):
             self._refresh_thumbnail(self.current_page)
             self.status("Freehand drawing added.")
 
+    def _on_move_finished(self, desc, dx: float, dy: float):
+        """Commit a Move-tool drag: reposition the grabbed object by (dx, dy) points."""
+        kind = desc.get("kind")
+        page = desc.get("page", self.current_page)
+        with self._mutation("Move"):
+            if kind == "span":
+                self.editor.move_span(desc["span"], dx, dy)
+                label = "Text moved."
+            elif kind == "block":
+                n = self.editor.move_block(page, desc["bbox"], dx, dy)
+                label = f"Paragraph moved ({n} line{'s' if n != 1 else ''})."
+            elif kind == "image":
+                self.document.move_image(page, desc["id"], dx, dy)
+                label = "Image moved."
+            elif kind == "annot":
+                self.document.move_annot(page, desc["id"], dx, dy)
+                label = "Object moved."
+            else:
+                return
+            self.render_current_page()
+            self._refresh_thumbnail(self.current_page)
+            self._update_title()
+            self.status(label)
+
     # -- insert / duplicate ------------------------------------------------
 
     def insert_image(self):
@@ -1636,12 +1674,20 @@ class MainWindow(QMainWindow):
 
     def _editing_actions(self):
         return [
+            self.act_mode_move, self.act_snap,
             self.act_mode_add, self.act_mode_box, self.act_mode_ocr, self.act_crop,
             self.act_page_size, self.act_undo, self.act_redo,
             self.act_insert_image, self.act_insert_pdf, self.act_insert_blank, self.act_duplicate_page,
             self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike, self.act_mk_note,
             self.act_mk_rect, self.act_mk_line, self.act_mk_ink, self.act_redact,
         ]
+
+    def _toggle_snap(self, on: bool):
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, DocumentTab):
+                w.view.set_snap(on)
+        self.status(f"Snap {'on — edges align to other objects' if on else 'off — move freely'}.")
 
     def _toggle_edit_mode(self, on: bool):
         self._view_only = not on
