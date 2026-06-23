@@ -131,6 +131,7 @@ class PageView(QGraphicsView):
         self._move_start = QPointF()    # scene-coord drag start
         self._move_ghost = None         # ghost preview rect
         self._snap_lines: list = []     # transient snap guide lines
+        self._cursor_cache: dict = {}   # mode-icon -> QCursor
 
         self.setMouseTracking(True)
 
@@ -140,20 +141,34 @@ class PageView(QGraphicsView):
     def zoom(self) -> float:
         return self._zoom
 
+    # tool -> icon name for the matching cursor
+    _CURSOR_ICON = {
+        Mode.SELECT: "select", Mode.MOVE: "move", Mode.ADD_TEXT: "text",
+        Mode.TEXT_BOX: "textbox", Mode.OCR_REGION: "ocr", Mode.CROP: "crop",
+        Mode.HIGHLIGHT: "highlight", Mode.UNDERLINE: "underline", Mode.STRIKE: "strike",
+        Mode.NOTE: "note", Mode.SHAPE_RECT: "rect", Mode.SHAPE_LINE: "line",
+        Mode.INK: "ink", Mode.REDACT: "redact", Mode.IMAGE: "image",
+    }
+
     def set_mode(self, mode: Mode):
         self._mode = mode
         self._dragging = False
         self._clear_preview()
         self._clear_move()
         self._cancel_inline_edit()
-        if mode == Mode.SELECT:
-            self.viewport().setCursor(Qt.ArrowCursor)
-        elif mode == Mode.MOVE:
-            self.viewport().setCursor(Qt.OpenHandCursor)
-        elif mode in (Mode.ADD_TEXT, Mode.NOTE):
-            self.viewport().setCursor(Qt.IBeamCursor)
-        else:
-            self.viewport().setCursor(Qt.CrossCursor)
+        self.viewport().setCursor(self._cursor_for(mode))
+
+    def _cursor_for(self, mode: Mode):
+        if mode == Mode.VIEW:
+            return Qt.ArrowCursor
+        name = self._CURSOR_ICON.get(mode)
+        if name is None:
+            return Qt.ArrowCursor
+        cache = self._cursor_cache
+        if name not in cache:
+            from . import icons
+            cache[name] = icons.cursor(name)
+        return cache[name]
 
     def set_movable(self, objects: list):
         """Non-text objects (images, annotations) the Move tool can grab/snap to."""
@@ -470,7 +485,7 @@ class PageView(QGraphicsView):
         desc = self._moving
         dx, dy = getattr(self, "_move_delta", (0.0, 0.0))
         self._clear_move()
-        self.viewport().setCursor(Qt.OpenHandCursor)
+        self.viewport().setCursor(self._cursor_for(Mode.MOVE))
         if abs(dx) > 0.5 or abs(dy) > 0.5:
             self.moveFinished.emit(desc, dx, dy)
 
@@ -518,9 +533,10 @@ class PageView(QGraphicsView):
                 bypass = bool(event.modifiers() & (Qt.MetaModifier | Qt.ControlModifier))
                 self._update_move(scene_pt, bypass)
             else:
-                # hover feedback: open hand over something grabbable
+                # open hand over something grabbable, the move-tool cursor otherwise
                 grab = self._movable_at(scene_pt) is not None
-                self.viewport().setCursor(Qt.OpenHandCursor if grab else Qt.ArrowCursor)
+                self.viewport().setCursor(Qt.OpenHandCursor if grab
+                                          else self._cursor_for(Mode.MOVE))
         elif self._mode == Mode.SELECT:
             span = self._span_at(scene_pt)
             self._show_hover(span)

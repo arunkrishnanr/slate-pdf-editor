@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QAction, QKeySequence, QIcon, QImage, QPainter
+from PySide6.QtGui import QAction, QKeySequence, QIcon, QImage, QPainter, QColor, QShortcut
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QDockWidget, QToolBar, QLabel,
@@ -31,6 +31,7 @@ from .dialogs import (
     FindReplaceDialog, DocumentSetupDialog, LicenseDialog,
 )
 from . import licensing
+from . import icons
 
 DEVELOPER = "Aaron Krrish"
 
@@ -141,6 +142,14 @@ class MainWindow(QMainWindow):
 
         # Point pytesseract at a bundled binary if present.
         self._configure_ocr()
+
+        # Full-screen presentation state + Esc-to-exit (enabled only while presenting).
+        self._presenting = False
+        self._esc_present = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self._esc_present.activated.connect(self.exit_presentation)
+        self._esc_present.setEnabled(False)
+        # Tool palette is for editing; hidden until Edit Mode is on.
+        self.tools_palette.setVisible(False)
 
     # -- tab proxying ------------------------------------------------------
     # Handlers were written against self.document / self.view / self.current_page etc.
@@ -339,6 +348,9 @@ class MainWindow(QMainWindow):
         self.act_zoom_in = QAction("Zoom In", self, shortcut=QKeySequence.ZoomIn, triggered=lambda: self._on_zoom_factor(1.15))
         self.act_zoom_out = QAction("Zoom Out", self, shortcut=QKeySequence.ZoomOut, triggered=lambda: self._on_zoom_factor(1/1.15))
         self.act_fit_window = QAction("Fit to Window", self, triggered=self.zoom_fit_window)
+        self.act_present = QAction("Full Screen", self, triggered=self.enter_presentation)
+        self.act_present.setShortcut("Ctrl+Shift+F")
+        self.act_present.setToolTip("Full Screen — just the document on black (view only; Esc to exit)")
 
         self.act_user_guide = QAction("User Guide", self, shortcut=QKeySequence.HelpContents,
                                       triggered=self.show_help)
@@ -351,11 +363,35 @@ class MainWindow(QMainWindow):
         self.act_license = QAction("Activate License…", self, triggered=self.open_license_dialog)
         self.act_license.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
 
+    def _assign_icons(self):
+        """Give actions their minimal line icons (drawn in slate/icons.py)."""
+        mapping = {
+            "open": self.act_open, "save": self.act_save, "undo": self.act_undo,
+            "redo": self.act_redo, "find": self.act_find, "prev": self.act_prev,
+            "next": self.act_next, "pagesize": self.act_page_size,
+            "tablerow": self.act_table_add_row, "tablecol": self.act_table_add_col,
+            "tableapply": self.act_table_apply, "present": self.act_present,
+            "select": self.act_mode_select, "move": self.act_mode_move,
+            "snap": self.act_snap, "text": self.act_mode_add, "textbox": self.act_mode_box,
+            "ocr": self.act_mode_ocr, "crop": self.act_crop,
+            "highlight": self.act_mk_highlight, "underline": self.act_mk_underline,
+            "strike": self.act_mk_strike, "note": self.act_mk_note, "rect": self.act_mk_rect,
+            "line": self.act_mk_line, "ink": self.act_mk_ink, "redact": self.act_redact,
+            "image": self.act_insert_image,
+        }
+        for name, act in mapping.items():
+            act.setIcon(icons.icon(name))
+
     def _build_toolbar(self):
+        self._assign_icons()
+
+        # --- top bar: document + navigation (icon-only) ---
         tb = QToolBar("Main")
-        tb.setIconSize(QSize(18, 18))
+        tb.setIconSize(QSize(20, 20))
         tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.addToolBar(tb)
+        self.main_toolbar = tb
         tb.addAction(self.act_open)
         tb.addAction(self.act_save)
         tb.addSeparator()
@@ -367,13 +403,6 @@ class MainWindow(QMainWindow):
         self.sw_edit = SwitchButton("Edit Mode", checked=False)
         self.sw_edit.toggled.connect(self._toggle_edit_mode)
         tb.addWidget(self.sw_edit)
-        tb.addSeparator()
-        tb.addAction(self.act_mode_select)
-        tb.addAction(self.act_mode_move)
-        tb.addAction(self.act_snap)
-        tb.addAction(self.act_mode_add)
-        tb.addAction(self.act_mode_box)
-        tb.addAction(self.act_mode_ocr)
         tb.addSeparator()
         tb.addAction(self.act_page_size)
         tb.addSeparator()
@@ -392,6 +421,8 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_table_add_row)
         tb.addAction(self.act_table_add_col)
         tb.addAction(self.act_table_apply)
+        tb.addSeparator()
+        tb.addAction(self.act_present)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -400,6 +431,29 @@ class MainWindow(QMainWindow):
         self.font_status.setStyleSheet("color: #cfd3da; padding-right: 8px;")
         tb.addWidget(self.font_status)
 
+        # --- floating vertical tool palette (undockable; drag anywhere) ---
+        pal = QToolBar("Tools")
+        pal.setOrientation(Qt.Vertical)
+        pal.setMovable(True)
+        pal.setFloatable(True)
+        pal.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        pal.setIconSize(QSize(22, 22))
+        self.addToolBar(Qt.LeftToolBarArea, pal)
+        for a in (self.act_mode_select, self.act_mode_move, self.act_snap):
+            pal.addAction(a)
+        pal.addSeparator()
+        for a in (self.act_mode_add, self.act_mode_box, self.act_mode_ocr, self.act_crop):
+            pal.addAction(a)
+        pal.addSeparator()
+        for a in (self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike,
+                  self.act_mk_note):
+            pal.addAction(a)
+        pal.addSeparator()
+        for a in (self.act_mk_rect, self.act_mk_line, self.act_mk_ink, self.act_redact,
+                  self.act_insert_image):
+            pal.addAction(a)
+        self.tools_palette = pal
+
     ZOOM_PRESETS = [25, 50, 75, 100, 125, 150, 175, 200]
 
     def _build_zoom_bar(self):
@@ -407,6 +461,7 @@ class MainWindow(QMainWindow):
         bar = QToolBar("Zoom")
         bar.setMovable(False)
         self.addToolBar(Qt.BottomToolBarArea, bar)
+        self.zoom_bar = bar
 
         self.btn_zoom_minus = QToolButton()
         self.btn_zoom_minus.setText("−")
@@ -507,6 +562,9 @@ class MainWindow(QMainWindow):
         m_view.addSeparator()
         for a in (self.act_zoom_in, self.act_zoom_out, self.act_fit_window):
             m_view.addAction(a)
+        m_view.addAction(self.act_present)
+        m_view.addSeparator()
+        m_view.addAction(self.tools_palette.toggleViewAction())
         m_view.addSeparator()
         m_view.addAction(self.act_para_detect)
         m_view.addAction(self.act_table_detect)
@@ -577,6 +635,8 @@ class MainWindow(QMainWindow):
         if is_open and self._view_only:
             for a in self._editing_actions():
                 a.setEnabled(False)
+        # Full Screen: view-mode only.
+        self.act_present.setEnabled(is_open and self._view_only)
 
     def status(self, msg: str, timeout: int = 0):
         self.statusBar().showMessage(msg, timeout)
@@ -1697,6 +1757,11 @@ class MainWindow(QMainWindow):
             a.setEnabled(on and self.document.is_open)
         if on:
             self._update_undo_actions()
+        # The vertical tool palette only makes sense while editing.
+        if hasattr(self, "tools_palette"):
+            self.tools_palette.setVisible(on)
+        # Full Screen is a view-only feature.
+        self.act_present.setEnabled((not on) and self.document.is_open)
         if self.tab() is not None:
             if on:
                 self.set_mode(Mode.SELECT)
@@ -1704,6 +1769,59 @@ class MainWindow(QMainWindow):
                 self.view.set_mode(Mode.VIEW)
         self.status("Edit mode — full editing enabled." if on
                     else "View Only — read-only; turn on Edit Mode to make changes.")
+
+    # -- full-screen presentation -----------------------------------------
+
+    def enter_presentation(self):
+        """Show just the document on a black background — no toolbars, panels, menus or
+        labels. View-only feature; Esc exits."""
+        if getattr(self, "_presenting", False):
+            return
+        if not self.document.is_open or not self._view_only:
+            self.status("Full Screen is available in View mode only.")
+            return
+        self._presenting = True
+        # remember what was visible so we can restore exactly
+        self._present_restore = {
+            "menu": self.menuBar().isVisible(),
+            "main_tb": self.main_toolbar.isVisible(),
+            "zoom": self.zoom_bar.isVisible(),
+            "pages": self.pages_dock.isVisible(),
+            "props": self.props_dock.isVisible(),
+            "status": self.statusBar().isVisible(),
+            "tabbar": self.tabs.tabBar().isVisible(),
+            "tools": self.tools_palette.isVisible(),
+        }
+        self.menuBar().setVisible(False)
+        self.main_toolbar.setVisible(False)
+        self.zoom_bar.setVisible(False)
+        self.pages_dock.setVisible(False)
+        self.props_dock.setVisible(False)
+        self.statusBar().setVisible(False)
+        self.tools_palette.setVisible(False)
+        self.tabs.tabBar().setVisible(False)
+        self.view.setBackgroundBrush(QColor(0, 0, 0))
+        self._esc_present.setEnabled(True)
+        self.showFullScreen()
+        self.zoom_fit_window()
+
+    def exit_presentation(self):
+        if not getattr(self, "_presenting", False):
+            return
+        self._presenting = False
+        self._esc_present.setEnabled(False)
+        r = getattr(self, "_present_restore", {})
+        self.showNormal()
+        self.menuBar().setVisible(r.get("menu", True))
+        self.main_toolbar.setVisible(r.get("main_tb", True))
+        self.zoom_bar.setVisible(r.get("zoom", True))
+        self.pages_dock.setVisible(r.get("pages", True))
+        self.props_dock.setVisible(r.get("props", True))
+        self.statusBar().setVisible(r.get("status", True))
+        self.tabs.tabBar().setVisible(r.get("tabbar", True))
+        self.tools_palette.setVisible(r.get("tools", False))
+        self.view.setBackgroundBrush(QColor(0x20, 0x20, 0x20))
+        self.zoom_fit_window()
 
     # -- help / about ------------------------------------------------------
 
