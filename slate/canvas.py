@@ -131,7 +131,6 @@ class PageView(QGraphicsView):
         self._move_start = QPointF()    # scene-coord drag start
         self._move_ghost = None         # ghost preview rect
         self._snap_lines: list = []     # transient snap guide lines
-        self._cursor_cache: dict = {}   # mode-icon -> QCursor
 
         self.setMouseTracking(True)
 
@@ -141,13 +140,24 @@ class PageView(QGraphicsView):
     def zoom(self) -> float:
         return self._zoom
 
-    # tool -> icon name for the matching cursor
-    _CURSOR_ICON = {
-        Mode.SELECT: "select", Mode.MOVE: "move", Mode.ADD_TEXT: "text",
-        Mode.TEXT_BOX: "textbox", Mode.OCR_REGION: "ocr", Mode.CROP: "crop",
-        Mode.HIGHLIGHT: "highlight", Mode.UNDERLINE: "underline", Mode.STRIKE: "strike",
-        Mode.NOTE: "note", Mode.SHAPE_RECT: "rect", Mode.SHAPE_LINE: "line",
-        Mode.INK: "ink", Mode.REDACT: "redact", Mode.IMAGE: "image",
+    # tool -> globally recognized OS cursor
+    _TOOL_CURSORS = {
+        Mode.VIEW: Qt.ArrowCursor,
+        Mode.SELECT: Qt.ArrowCursor,        # pick / edit
+        Mode.MOVE: Qt.SizeAllCursor,        # 4-way move
+        Mode.ADD_TEXT: Qt.IBeamCursor,      # text insertion
+        Mode.TEXT_BOX: Qt.IBeamCursor,
+        Mode.OCR_REGION: Qt.CrossCursor,    # drag a region
+        Mode.CROP: Qt.CrossCursor,
+        Mode.HIGHLIGHT: Qt.IBeamCursor,     # target text
+        Mode.UNDERLINE: Qt.IBeamCursor,
+        Mode.STRIKE: Qt.IBeamCursor,
+        Mode.NOTE: Qt.CrossCursor,
+        Mode.SHAPE_RECT: Qt.CrossCursor,
+        Mode.SHAPE_LINE: Qt.CrossCursor,
+        Mode.INK: Qt.CrossCursor,
+        Mode.REDACT: Qt.CrossCursor,
+        Mode.IMAGE: Qt.CrossCursor,
     }
 
     def set_mode(self, mode: Mode):
@@ -159,16 +169,7 @@ class PageView(QGraphicsView):
         self.viewport().setCursor(self._cursor_for(mode))
 
     def _cursor_for(self, mode: Mode):
-        if mode == Mode.VIEW:
-            return Qt.ArrowCursor
-        name = self._CURSOR_ICON.get(mode)
-        if name is None:
-            return Qt.ArrowCursor
-        cache = self._cursor_cache
-        if name not in cache:
-            from . import icons
-            cache[name] = icons.cursor(name)
-        return cache[name]
+        return self._TOOL_CURSORS.get(mode, Qt.ArrowCursor)
 
     def set_movable(self, objects: list):
         """Non-text objects (images, annotations) the Move tool can grab/snap to."""

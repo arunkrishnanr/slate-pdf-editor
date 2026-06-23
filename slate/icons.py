@@ -10,7 +10,7 @@ glyph so the pointer represents the active tool.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QByteArray
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QCursor
+from PySide6.QtGui import QIcon, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 
 LIGHT = "#e6e6e6"   # normal stroke on the dark theme
@@ -106,16 +106,6 @@ _GLYPHS = {
                   '<path d="M3 10 H21 M9 4 V20"/></g>',
 }
 
-# Cursor hotspot per tool (in the 24-px glyph space). Defaults to the centre.
-_HOTSPOTS = {
-    "select": (4, 3),       # arrow tip
-    "move": (12, 12),
-    "text": (12, 12),
-    "ink": (5, 19),         # pencil tip
-    "highlight": (6, 19),
-}
-
-
 def _svg_bytes(name: str, color: str) -> QByteArray:
     body = _GLYPHS[name].replace("{c}", color)
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
@@ -142,12 +132,3 @@ def icon(name: str, size: int = 22) -> QIcon:
     ic.addPixmap(_pixmap(name, DARK, size), QIcon.Normal, QIcon.On)
     ic.addPixmap(_pixmap(name, DARK, size), QIcon.Active, QIcon.On)
     return ic
-
-
-def cursor(name: str, size: int = 26) -> QCursor:
-    """A QCursor shaped like the tool's icon, with a sensible hotspot."""
-    pm = _pixmap(name, LIGHT, size)
-    hx, hy = _HOTSPOTS.get(name, (size // 2, size // 2))
-    # hotspots are authored in 24-px space; scale to the cursor size
-    sx = sy = size / 24.0
-    return QCursor(pm, int(hx * sx), int(hy * sy))

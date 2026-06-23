@@ -150,6 +150,9 @@ class MainWindow(QMainWindow):
         self._esc_present.setEnabled(False)
         # Tool palette is for editing; hidden until Edit Mode is on.
         self.tools_palette.setVisible(False)
+        # Table row/col/apply only make sense once Table detection is on.
+        for a in (self.act_table_add_row, self.act_table_add_col, self.act_table_apply):
+            a.setVisible(False)
 
     # -- tab proxying ------------------------------------------------------
     # Handlers were written against self.document / self.view / self.current_page etc.
@@ -308,7 +311,9 @@ class MainWindow(QMainWindow):
         self.act_recognize_all = QAction("Recognize Text — All Pages", self, triggered=lambda: self.recognize_text(True))
 
         self.act_mode_select = QAction("Select", self, checkable=True, triggered=lambda: self.set_mode(Mode.SELECT))
+        self.act_mode_select.setToolTip("Select / Edit text — click a line or paragraph to edit it")
         self.act_mode_move = QAction("Move", self, checkable=True, triggered=lambda: self.set_mode(Mode.MOVE))
+        self.act_mode_move.setToolTip("Move — drag text, images or shapes; edges snap (hold ⌘ to bypass)")
         self.act_mode_add = QAction("Add Text", self, checkable=True, triggered=lambda: self.set_mode(Mode.ADD_TEXT))
         self.act_mode_box = QAction("Text Box", self, checkable=True, triggered=lambda: self.set_mode(Mode.TEXT_BOX))
         self.act_mode_ocr = QAction("OCR Region", self, checkable=True, triggered=lambda: self.set_mode(Mode.OCR_REGION))
@@ -439,19 +444,22 @@ class MainWindow(QMainWindow):
         pal.setToolButtonStyle(Qt.ToolButtonIconOnly)
         pal.setIconSize(QSize(22, 22))
         self.addToolBar(Qt.LeftToolBarArea, pal)
-        for a in (self.act_mode_select, self.act_mode_move, self.act_snap):
+        # Lean, logically grouped tool set. Occasional/destructive tools (OCR, Crop,
+        # Redact, Insert Image) live in their menus (Tools / Markup / Insert), not here.
+        for a in (self.act_mode_select, self.act_mode_move):          # select / manipulate
             pal.addAction(a)
         pal.addSeparator()
-        for a in (self.act_mode_add, self.act_mode_box, self.act_mode_ocr, self.act_crop):
+        for a in (self.act_mode_add, self.act_mode_box):              # text
             pal.addAction(a)
         pal.addSeparator()
-        for a in (self.act_mk_highlight, self.act_mk_underline, self.act_mk_strike,
-                  self.act_mk_note):
+        for a in (self.act_mk_highlight, self.act_mk_underline,       # markup
+                  self.act_mk_strike, self.act_mk_note):
             pal.addAction(a)
         pal.addSeparator()
-        for a in (self.act_mk_rect, self.act_mk_line, self.act_mk_ink, self.act_redact,
-                  self.act_insert_image):
+        for a in (self.act_mk_rect, self.act_mk_line, self.act_mk_ink):  # draw
             pal.addAction(a)
+        pal.addSeparator()
+        pal.addAction(self.act_snap)                                  # Move option (not a tool)
         self.tools_palette = pal
 
     ZOOM_PRESETS = [25, 50, 75, 100, 125, 150, 175, 200]
@@ -635,8 +643,8 @@ class MainWindow(QMainWindow):
         if is_open and self._view_only:
             for a in self._editing_actions():
                 a.setEnabled(False)
-        # Full Screen: view-mode only.
-        self.act_present.setEnabled(is_open and self._view_only)
+        # Full Screen: available whenever a document is open (both modes).
+        self.act_present.setEnabled(is_open)
 
     def status(self, msg: str, timeout: int = 0):
         self.statusBar().showMessage(msg, timeout)
@@ -1759,9 +1767,8 @@ class MainWindow(QMainWindow):
             self._update_undo_actions()
         # The vertical tool palette only makes sense while editing.
         if hasattr(self, "tools_palette"):
-            self.tools_palette.setVisible(on)
-        # Full Screen is a view-only feature.
-        self.act_present.setEnabled((not on) and self.document.is_open)
+            self.tools_palette.setVisible(on and not getattr(self, "_presenting", False))
+        self.act_present.setEnabled(self.document.is_open)
         if self.tab() is not None:
             if on:
                 self.set_mode(Mode.SELECT)
@@ -1773,14 +1780,15 @@ class MainWindow(QMainWindow):
     # -- full-screen presentation -----------------------------------------
 
     def enter_presentation(self):
-        """Show just the document on a black background — no toolbars, panels, menus or
-        labels. View-only feature; Esc exits."""
+        """Maximise the document on a black background — no menus, toolbars, panels or
+        labels. Works in both View and Edit mode; while editing, the floating tool palette
+        stays so you can keep working. Esc exits."""
         if getattr(self, "_presenting", False):
             return
-        if not self.document.is_open or not self._view_only:
-            self.status("Full Screen is available in View mode only.")
+        if not self.document.is_open:
             return
         self._presenting = True
+        keep_tools = not self._view_only  # editing -> keep the tools reachable
         # remember what was visible so we can restore exactly
         self._present_restore = {
             "menu": self.menuBar().isVisible(),
@@ -1798,7 +1806,7 @@ class MainWindow(QMainWindow):
         self.pages_dock.setVisible(False)
         self.props_dock.setVisible(False)
         self.statusBar().setVisible(False)
-        self.tools_palette.setVisible(False)
+        self.tools_palette.setVisible(keep_tools)
         self.tabs.tabBar().setVisible(False)
         self.view.setBackgroundBrush(QColor(0, 0, 0))
         self._esc_present.setEnabled(True)
